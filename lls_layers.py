@@ -37,19 +37,26 @@ def compute_LocalLosses(activation, labels, local_classifier, temperature=1, lab
     loss = torch.nn.functional.cross_entropy(layer_pred / temperature, labels, label_smoothing=label_smoothing)
     return loss
 
-def layer_pred_LLS(activation, act_size=1, n_classes=10, modulation_term=None, modulation=False, freq=None, waveform="cosine"):
+def layer_pred_LLS(activation, act_size=1, n_classes=10, modulation_term=None, modulation=False, freq=None, waveform="cosine", linear_layer=None):
     batch_size = activation.size(0) if activation.dim() > 1 else 1
     if activation.dim() == 4:
         latents = F.adaptive_avg_pool2d(activation, (act_size, act_size)).view(batch_size, -1)
     else:
         latents = F.adaptive_avg_pool1d(activation.view(batch_size, -1), act_size).view(batch_size, -1)
-    basis = generate_frequency_matrix(n_classes, latents.size(1), max_freq=512, freq=freq).to(device)
-    # basis = generate_frequency_matrix(n_classes, latents.size(1), max_freq=latents.size(1) - 50).to(device)
-    if waveform == "square":
-        basis = torch.sign(basis)
-
+    
     latents = F.normalize(latents, dim=1)
-    layer_pred = torch.matmul(latents, basis.T)
+    
+    if linear_layer is not None:
+        # Use nn.Linear layer instead of matrix multiplication
+        layer_pred = linear_layer(latents)
+    else:
+        # Keep original matrix multiplication approach for backward compatibility
+        basis = generate_frequency_matrix(n_classes, latents.size(1), max_freq=512, freq=freq).to(device)
+        # basis = generate_frequency_matrix(n_classes, latents.size(1), max_freq=latents.size(1) - 50).to(device)
+        if waveform == "square":
+            basis = torch.sign(basis)
+        layer_pred = torch.matmul(latents, basis.T)
+    
     if modulation == 1:
         layer_pred = modulation_term*layer_pred
     if modulation == 2:
@@ -58,8 +65,8 @@ def layer_pred_LLS(activation, act_size=1, n_classes=10, modulation_term=None, m
     return layer_pred
 
 def compute_LLS(activation, labels, temperature=1, label_smoothing=0.0, act_size=1, n_classes=10,
-                modulation_term=None, modulation=False, freq=None, waveform="cosine", loss_type="cross_entropy"):
-    layer_pred = layer_pred_LLS(activation, act_size, n_classes, modulation_term, modulation, freq, waveform)
+                modulation_term=None, modulation=False, freq=None, waveform="cosine", loss_type="cross_entropy", linear_layer=None):
+    layer_pred = layer_pred_LLS(activation, act_size, n_classes, modulation_term, modulation, freq, waveform, linear_layer)
     if loss_type == "cross_entropy":
         loss = torch.nn.functional.cross_entropy(layer_pred / temperature, labels, label_smoothing=label_smoothing)
     elif loss_type == "mse":
@@ -122,6 +129,7 @@ class LLS_layer(nn.Module):
         self.scaler = None
         self.loss_type = loss_type
         self.feedback = None
+        self.feedback_linear = None
         self.modulation = None
         self.modulation_mode = None
 
@@ -149,6 +157,15 @@ class LLS_layer(nn.Module):
         elif "LLS_MxM_reduced" in self.training_mode:
             self.feedback = nn.Parameter(torch.Tensor(0.01 * torch.randn([self.reduced_set, n_classes])), requires_grad=True)
             self.modulation_mode = 2
+        
+        # Create nn.Linear layer for feedback (alternative to parameter-based approach)
+        # Initialize with frequency basis for better starting point
+        if "PPO" in self.training_mode or "LLS" in self.training_mode:
+            self.feedback_linear = nn.Linear(pooling_size, n_classes, bias=False)
+            # Initialize weights with frequency matrix
+            with torch.no_grad():
+                freq_basis = generate_frequency_matrix(n_classes, pooling_size, max_freq=512)
+                self.feedback_linear.weight.data = freq_basis
 
         # Optimizer
         if training_mode != "BP":

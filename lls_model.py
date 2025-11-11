@@ -190,13 +190,25 @@ class LLS_Model(nn.Module):
         x = x.to(device)
 
         x = self.linear_block1(x)
-        layer_pred = layer_pred_LLS(x, act_size=self.hidden, n_classes=self.n_classes, modulation_term=self.linear_block1.feedback, 
-                                    modulation=self.linear_block1.modulation_mode, freq=None, waveform=self.waveform)
+        # Use feedback_linear if available, otherwise fall back to feedback parameter
+        linear_layer1 = self.linear_block1.feedback_linear if self.linear_block1.feedback_linear is not None else None
+        layer_pred = layer_pred_LLS(x, act_size=self.hidden, n_classes=self.n_classes, 
+                                    modulation_term=self.linear_block1.feedback, 
+                                    modulation=self.linear_block1.modulation_mode, 
+                                    freq=None, waveform=self.waveform, 
+                                    linear_layer=linear_layer1)
         hidden_states.append(layer_pred[0].clone())
-        x = self.linear_block2(x.detach()) 
-        layer_pred = layer_pred_LLS(x, act_size=self.hidden, n_classes=self.n_classes, modulation_term=self.linear_block2.feedback, 
-                                    modulation=self.linear_block2.modulation_mode, freq=None, waveform=self.waveform)
+        
+        x = self.linear_block2(x.detach())
+        # Use feedback_linear if available, otherwise fall back to feedback parameter
+        linear_layer2 = self.linear_block2.feedback_linear if self.linear_block2.feedback_linear is not None else None
+        layer_pred = layer_pred_LLS(x, act_size=self.hidden, n_classes=self.n_classes, 
+                                    modulation_term=self.linear_block2.feedback, 
+                                    modulation=self.linear_block2.modulation_mode, 
+                                    freq=None, waveform=self.waveform, 
+                                    linear_layer=linear_layer2)
         hidden_states.append(layer_pred[0].clone())
+        
         x = self.linear_out(x.detach())
 
         if self.is_actor:
