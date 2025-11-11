@@ -14,17 +14,9 @@ def generate_frequency_matrix(num_rows, num_cols, min_freq=50, max_freq=2000, fr
         frequencies = torch.linspace(min_freq, max_freq, num_rows).unsqueeze(1).to(device)
     else:
         frequencies = freq
-    # phases = torch.randn(num_rows, 1) * 2 * 3.14159
     t = torch.arange(num_cols).float().unsqueeze(0).to(device)
     sinusoids = torch.sin(frequencies * t )
     return sinusoids
-
-# def generate_frequency_matrix(num_rows, num_cols, min_freq=100, max_freq=2000, freq=None):
-#     frequencies = torch.linspace(min_freq, max_freq, num_rows).unsqueeze(1)
-#     # phases = torch.randn(num_rows, 1) * 2 * 3.14159
-#     t = torch.arange(num_cols).float().unsqueeze(0)
-#     sinusoids = torch.cos(np.pi*frequencies * (t + 0.5)/num_cols)
-#     return sinusoids
 
 def compute_LocalLosses(activation, labels, local_classifier, temperature=1, label_smoothing=0.0, act_size=8):
     batch_size = activation.size(0)
@@ -37,19 +29,23 @@ def compute_LocalLosses(activation, labels, local_classifier, temperature=1, lab
     loss = torch.nn.functional.cross_entropy(layer_pred / temperature, labels, label_smoothing=label_smoothing)
     return loss
 
-def layer_pred_LLS(activation, act_size=1, n_classes=10, modulation_term=None, modulation=False, freq=None, waveform="cosine"):
+def layer_pred_LLS(activation, act_size=1, n_classes=10, modulation_term=None, modulation=False, freq=None, waveform="cosine", linear_layer=None):
     batch_size = activation.size(0) if activation.dim() > 1 else 1
     if activation.dim() == 4:
         latents = F.adaptive_avg_pool2d(activation, (act_size, act_size)).view(batch_size, -1)
     else:
         latents = F.adaptive_avg_pool1d(activation.view(batch_size, -1), act_size).view(batch_size, -1)
-    basis = generate_frequency_matrix(n_classes, latents.size(1), max_freq=512, freq=freq).to(device)
-    # basis = generate_frequency_matrix(n_classes, latents.size(1), max_freq=latents.size(1) - 50).to(device)
-    if waveform == "square":
-        basis = torch.sign(basis)
-
+    
     latents = F.normalize(latents, dim=1)
-    layer_pred = torch.matmul(latents, basis.T)
+    
+    if linear_layer is not None:
+        layer_pred = linear_layer(latents)
+    else:
+        basis = generate_frequency_matrix(n_classes, latents.size(1), max_freq=512, freq=freq).to(device)
+        if waveform == "square":
+            basis = torch.sign(basis)
+        layer_pred = torch.matmul(latents, basis.T)
+    
     if modulation == 1:
         layer_pred = modulation_term*layer_pred
     if modulation == 2:
@@ -58,8 +54,8 @@ def layer_pred_LLS(activation, act_size=1, n_classes=10, modulation_term=None, m
     return layer_pred
 
 def compute_LLS(activation, labels, temperature=1, label_smoothing=0.0, act_size=1, n_classes=10,
-                modulation_term=None, modulation=False, freq=None, waveform="cosine", loss_type="cross_entropy"):
-    layer_pred = layer_pred_LLS(activation, act_size, n_classes, modulation_term, modulation, freq, waveform)
+                modulation_term=None, modulation=False, freq=None, waveform="cosine", loss_type="cross_entropy", linear_layer=None):
+    layer_pred = layer_pred_LLS(activation, act_size, n_classes, modulation_term, modulation, freq, waveform, linear_layer)
     if loss_type == "cross_entropy":
         loss = torch.nn.functional.cross_entropy(layer_pred / temperature, labels, label_smoothing=label_smoothing)
     elif loss_type == "mse":
@@ -125,10 +121,14 @@ class LLS_layer(nn.Module):
         self.modulation = None
         self.modulation_mode = None
 
-        if  "LocalLosses" in self.training_mode:
+        if "PPO" in self.training_mode:
+            self.feedback = nn.Linear(pooling_size, n_classes, bias=False)
+            with torch.no_grad():
+                freq_basis = generate_frequency_matrix(n_classes, pooling_size, max_freq=512)
+                self.feedback.weight.data = freq_basis
+        elif "LocalLosses" in self.training_mode:
             self.feedback = nn.Parameter(torch.Tensor(0.1 * torch.randn([n_classes, hidden_dim])), requires_grad=True)
             self.training_mode = "LocalLosses"
-
         elif "LLS_Random" in self.training_mode:
             self.feedback = nn.Parameter(torch.Tensor(0.1 * torch.randn([n_classes, hidden_dim])),
                                          requires_grad=False)
