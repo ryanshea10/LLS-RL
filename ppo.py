@@ -6,7 +6,7 @@ import time
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from torch.distributions import Categorical
+from torch.distributions import Categorical, Normal
 
 class PPO:
     """
@@ -24,9 +24,19 @@ class PPO:
             Returns:
                 None
         """
+
+        self.action_space = hyperparameters.get('action_space')
+        if self.action_space is None:
+            raise ValueError(
+                "action_space must be included in hyperparameters used to initialize PPO()"
+            )
+
         # Make sure the environment is compatible with our code
         assert(type(env.observation_space) == gym.spaces.Box)
-        assert(type(env.action_space) == gym.spaces.Discrete)
+        if self.action_space == 'discrete':
+            assert(type(env.action_space) == gym.spaces.Discrete)
+        else:
+            assert(type(env.action_space) == gym.spaces.Box)
 
         # Initialize hyperparameters for training with PPO
         self._init_hyperparameters(hyperparameters)
@@ -34,11 +44,14 @@ class PPO:
         # Extract environment information
         self.env = env
         self.obs_dim = env.observation_space.shape[0]
-        self.act_dim = env.action_space.n  # Number of discrete actions
+        if self.action_space == 'discrete':
+            self.act_dim = env.action_space.n  # Number of discrete actions
+        else:
+            self.act_dim = env.action_space.shape[0]
 
         # Initialize actor and critic networks
-        self.actor = policy_class(self.obs_dim, self.act_dim, is_actor=True)  # ALG STEP 1
-        self.critic = policy_class(self.obs_dim, 1, is_actor=False)
+        self.actor = policy_class(self.obs_dim, self.act_dim, is_actor=True, action_space=self.action_space)  # ALG STEP 1
+        self.critic = policy_class(self.obs_dim, 1, is_actor=False, action_space=self.action_space)
 
         # Initialize optimizers for actor and critic
         self.actor_optim = Adam(self.actor.parameters(), lr=self.lr)
@@ -252,7 +265,14 @@ class PPO:
 
         # Reshape data as tensors in the shape specified in function description, before returning
         batch_obs = torch.tensor(np.array(batch_obs), dtype=torch.float)
-        batch_acts = torch.tensor(np.array(batch_acts), dtype=torch.long)  # Convert to numpy array first
+
+        # Change dtype of actions tensor depending on action space type 
+        # (torch.long for discrete, torch.float for continuous)
+        if self.action_space == 'discrete':
+            batch_acts = torch.tensor(np.array(batch_acts), dtype=torch.long)
+        else:
+            batch_acts = torch.tensor(np.array(batch_acts), dtype=torch.float)
+            
         batch_log_probs = torch.tensor(np.array(batch_log_probs), dtype=torch.float)
 
         # Log the episodic returns and episodic lengths in this batch.
@@ -322,20 +342,34 @@ class PPO:
                 action - the action to take, as a numpy array
                 log_prob - the log probability of the selected action in the distribution
         """
-        # Query the actor network for action probabilities
-        action_probs = self.actor(obs)
 
-        # Create a categorical distribution with the action probabilities
-        dist = Categorical(action_probs)
+        if self.action_space == 'discrete':
+            # Query the actor network for action probabilities
+            action_probs = self.actor(obs)
+            # Create a categorical distribution with the action probabilities
+            dist = Categorical(action_probs)
+            # Sample an action from the distribution
+            action = dist.sample()
+            # Calculate the log probability for that action
+            log_prob = dist.log_prob(action)
+            # Return the sampled action and the log probability of that action in our distribution
+            return action.detach().numpy(), log_prob.detach()
 
-        # Sample an action from the distribution
-        action = dist.sample()
+        else:
+            # Query actor network for parameters defining distributions over action values
+            means, log_stds = self.actor(obs)
+            stds = log_stds.exp()
+            # Create Normal distributions using parameters to sample action values from
+            dist = Normal(means, stds)
+            # Sample action from the distribution
+            action = dist.sample()
+            # Clamp to valid range for continuous Lunar Lander
+            action = torch.clamp(action, -1.0, 1.0)
+            # Sum log probs across action dims
+            log_probs = dist.log_prob(action).sum(dim=-1)
+            # Return the sampled action and the log probability of that action in our distribution
+            return action.detach().numpy(), log_prob.detach()
 
-        # Calculate the log probability for that action
-        log_prob = dist.log_prob(action)
-
-        # Return the sampled action and the log probability of that action in our distribution
-        return action.detach().numpy(), log_prob.detach()
 
     def evaluate(self, batch_obs, batch_acts):
         """
@@ -356,14 +390,23 @@ class PPO:
         # Query critic network for a value V for each batch_obs
         V = self.critic(batch_obs).squeeze()
 
-        # Calculate the log probabilities of batch actions using most recent actor network
-        action_probs = self.actor(batch_obs)
-        dist = Categorical(action_probs)
-        log_probs = dist.log_prob(batch_acts)
+        if self.action_space == 'discrete':
+            # Calculate the log probabilities of batch actions using most recent actor network
+            action_probs = self.actor(batch_obs)
+            dist = Categorical(action_probs)
+            log_probs = dist.log_prob(batch_acts)
+            entropy = dist.entropy()
+        else:
+            means, log_stds = self.actor(batch_obs)
+            stds = log_stds.exp()
+            dist = Normal(means, stds)
+            # Sum over action dims
+            log_probs = dist.log_prob(batch_acts).sum(dim=-1)
+            entropy = dist.entropy().sum(dim=-1)
 
         # Return the value vector V of each observation in the batch
         # and log probabilities log_probs of each action in the batch
-        return V, log_probs, dist.entropy()
+        return V, log_probs, entropy
 
     def _init_hyperparameters(self, hyperparameters):
         """
