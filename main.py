@@ -119,7 +119,7 @@ def test(env, actor_model, action_space: str = "discrete"):
     # that once we are done training the model/policy with ppo.py, we no longer need
     # ppo.py since it only contains the training algorithm. The model/policy itself exists
     # independently as a binary file that can be loaded in with torch.
-    eval_policy(policy=policy, env=env, render=True)
+    eval_policy(policy=policy, env=env, render=True, action_space=action_space)
 
 def main(args):
     """
@@ -160,7 +160,7 @@ def main(args):
     if 'train' in args.mode:
         train(env=env, hyperparameters=hyperparameters, actor_model=args.actor_model, critic_model=args.critic_model)
     else:
-        test(env=env, actor_model=args.actor_model, args=args)
+        test(env=env, actor_model=args.actor_model, action_space=args.action_space)
 
 if __name__ == '__main__':
     args = get_args() # Parse arguments from command line

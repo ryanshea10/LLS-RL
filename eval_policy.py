@@ -28,7 +28,7 @@ def _log_summary(ep_len, ep_ret, ep_num):
         print(f"------------------------------------------------------", flush=True)
         print(flush=True)
 
-def rollout(policy, env, render):
+def rollout(policy, env, render, action_space: str = "discrete"):
     """
         Returns a generator to roll out each episode given a trained policy and
         environment to test on. 
@@ -68,7 +68,15 @@ def rollout(policy, env, render):
                 env.render()
 
             # Query deterministic action from policy and run it
-            action = policy(obs).detach().numpy()
+            if action_space == 'discrete':
+                action = policy(obs).detach().numpy()
+            else:
+                means, log_stds = policy(obs)
+                # Mean for deterministic eval
+                action = mea.detach().numpy()
+                # Clip since valid action in continuous Lunar Lander must be in [-1.0, 1.0]
+                action = np.clip(action, -1.0, 1.0)
+
             obs, rew, terminated, truncated, _ = env.step(action)
             done = terminated | truncated
 
@@ -81,7 +89,7 @@ def rollout(policy, env, render):
         # returns episodic length and return in this iteration
         yield ep_len, ep_ret
 
-def eval_policy(policy, env, render=False):
+def eval_policy(policy, env, render=False, action_space: str = "discrete"):
     """
         The main function to evaluate our policy with. It will iterate a generator object
         "rollout", which will simulate each episode and return the most recent episode's
@@ -99,5 +107,5 @@ def eval_policy(policy, env, render=False):
         NOTE: To learn more about generators, look at rollout's function description
     """
     # Rollout with the policy and environment, and log each episode's data
-    for ep_num, (ep_len, ep_ret) in enumerate(rollout(policy, env, render)):
+    for ep_num, (ep_len, ep_ret) in enumerate(rollout(policy, env, render, action_space=action_space)):
         _log_summary(ep_len=ep_len, ep_ret=ep_ret, ep_num=ep_num)
