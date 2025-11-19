@@ -177,8 +177,19 @@ class PPO:
 
             # Save our model if it's time
             if i_so_far % self.save_freq == 0:
-                torch.save(self.actor.state_dict(), './saved_models/ppo_actor.pt')
-                torch.save(self.critic.state_dict(), './saved_models/ppo_critic.pt')
+                # Save with metadata for validation during loading
+                torch.save({
+                    'state_dict': self.actor.state_dict(),
+                    'action_space': self.action_space,
+                    'obs_dim': self.obs_dim,
+                    'act_dim': self.act_dim,
+                }, './saved_models/ppo_actor.pt')
+                torch.save({
+                    'state_dict': self.critic.state_dict(),
+                    'action_space': self.action_space,
+                    'obs_dim': self.obs_dim,
+                    'act_dim': 1,  # Critic always outputs single value
+                }, './saved_models/ppo_critic.pt')
 
         # Close wandb run
         wandb.finish()

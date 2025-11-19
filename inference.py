@@ -33,15 +33,30 @@ def run_inference(actor_model_path, num_episodes=1, save_gif=True, env_params=No
                    turbulence_power=1.5,
                    )
 
-    # Extract dimensions from environment
-    obs_dim = env.observation_space.shape[0]
-    act_dim = env.action_space.n
+    # Load the saved model checkpoint
+    checkpoint = torch.load(actor_model_path)
+    
+    # Check if this is a new-style checkpoint with metadata or old-style (just state_dict)
+    if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+        # New format with metadata
+        action_space = checkpoint['action_space']
+        obs_dim = checkpoint['obs_dim']
+        act_dim = checkpoint['act_dim']
+        state_dict = checkpoint['state_dict']
+        print(f"Loaded model metadata: action_space={action_space}, obs_dim={obs_dim}, act_dim={act_dim}")
+    else:
+        # Old format (just state_dict) - assume discrete
+        print("WARNING: Model saved without metadata. Assuming discrete action space.")
+        action_space = 'discrete'
+        state_dict = checkpoint
+        obs_dim = env.observation_space.shape[0]
+        act_dim = env.action_space.n
 
     # Build policy network
-    policy = FeedForwardNN(obs_dim, act_dim, is_actor=True)
+    policy = FeedForwardNN(obs_dim, act_dim, is_actor=True, action_space=action_space)
     
-    # Load trained policy
-    policy.load_state_dict(torch.load(actor_model_path))
+    # Load trained policy weights
+    policy.load_state_dict(state_dict)
     policy.eval()  # Set to evaluation mode
 
     # Lists to store rewards and frames

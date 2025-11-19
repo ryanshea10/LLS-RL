@@ -97,23 +97,50 @@ def test(env, actor_model, action_space: str = "discrete"):
         print(f"Didn't specify model file. Exiting.", flush=True)
         sys.exit(0)
 
-    # Extract out dimensions of observation and action spaces
-    obs_dim = env.observation_space.shape[0]
-    if action_space == 'discrete':  
-        act_dim = env.action_space.n # Number of discrete actions
-    elif action_space == 'continuous':
-        act_dim = env.action_space.shape[0] # Size of continuous action space
+    # Load the saved model checkpoint
+    checkpoint = torch.load(actor_model)
+    
+    # Check if this checkpoint contains metadata or just state dict
+    if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+        # New format with metadata
+        saved_action_space = checkpoint['action_space']
+        saved_obs_dim = checkpoint['obs_dim']
+        saved_act_dim = checkpoint['act_dim']
+        state_dict = checkpoint['state_dict']
+        
+        # Validate action space matches
+        if saved_action_space != action_space:
+            print(f"WARNING: Model was trained with action_space='{saved_action_space}' "
+                  f"but you specified action_space='{action_space}'", flush=True)
+            print(f"Using the model's action_space: '{saved_action_space}'", flush=True)
+            action_space = saved_action_space
+        
+        obs_dim = saved_obs_dim
+        act_dim = saved_act_dim
+        
+        print(f"Loaded model metadata: action_space={action_space}, obs_dim={obs_dim}, act_dim={act_dim}", flush=True)
     else:
-        raise ValueError(
-            f"Unrecognized action_space type in test(): '{action_space}'. "
-            "action_space must be one of {'discrete', 'continuous'}."
-        )
+        # If model saved as only state dict (no metadata), use provided action_space
+        print(f"WARNING: Model was saved without metadata. Assuming action_space='{action_space}'", flush=True)
+        state_dict = checkpoint
+        
+        # Extract dimensions from environment
+        obs_dim = env.observation_space.shape[0]
+        if action_space == 'discrete':  
+            act_dim = env.action_space.n
+        elif action_space == 'continuous':
+            act_dim = env.action_space.shape[0]
+        else:
+            raise ValueError(
+                f"Unrecognized action_space type in test(): '{action_space}'. "
+                "action_space must be one of {'discrete', 'continuous'}."
+            )
 
     # Build our policy the same way we build our actor model in PPO
     policy = FeedForwardNN(obs_dim, act_dim, is_actor=True, action_space=action_space)
 
-    # Load in the actor model saved by the PPO algorithm
-    policy.load_state_dict(torch.load(actor_model))
+    # Load in the actor model weights
+    policy.load_state_dict(state_dict)
 
     # Evaluate our policy with a separate module, eval_policy, to demonstrate
     # that once we are done training the model/policy with ppo.py, we no longer need
