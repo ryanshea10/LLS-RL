@@ -31,6 +31,8 @@ def get_args():
     parser.add_argument('--mode', dest='mode', type=str, default='train_lls')              # can be 'train', 'train_lls', or 'test'
     parser.add_argument('--actor_model', dest='actor_model', type=str, default='')     # your actor model filename
     parser.add_argument('--critic_model', dest='critic_model', type=str, default='')   # your critic model filename
+    parser.add_argument('--action_space', dest='action_space', type=str, 
+        choices=["discrete", "continuous"], default="discrete")
 
     args = parser.parse_args()
 
@@ -77,7 +79,7 @@ def train(env, hyperparameters, actor_model, critic_model):
     # you can kill the process whenever you feel like PPO is converging
     model.learn(total_timesteps=200_000_000)
 
-def test(env, actor_model):
+def test(env, actor_model, action_space: str = "discrete"):
     """
         Tests the model.
 
@@ -97,10 +99,18 @@ def test(env, actor_model):
 
     # Extract out dimensions of observation and action spaces
     obs_dim = env.observation_space.shape[0]
-    act_dim = env.action_space.n  # Number of discrete actions
+    if action_space == 'discrete':  
+        act_dim = env.action_space.n # Number of discrete actions
+    elif action_space == 'continuous':
+        act_dim = env.action_space.shape[0] # Size of continuous action space
+    else:
+        raise ValueError(
+            f"Unrecognized action_space type in test(): '{action_space}'. "
+            "action_space must be one of {'discrete', 'continuous'}."
+        )
 
     # Build our policy the same way we build our actor model in PPO
-    policy = FeedForwardNN(obs_dim, act_dim, is_actor=True)
+    policy = FeedForwardNN(obs_dim, act_dim, is_actor=True, action_space=action_space)
 
     # Load in the actor model saved by the PPO algorithm
     policy.load_state_dict(torch.load(actor_model))
@@ -132,14 +142,16 @@ def main(args):
                 'lr': 3e-4, 
                 'clip': 0.2,
                 'render': True,
-                'render_every_i': 10
+                'render_every_i': 10,
+                'action_space': args.action_space,
               }
 
     # Creates the environment we'll be running. If you want to replace with your own
     # custom environment, note that it must inherit Gym and have both continuous
     # observation and action spaces.
+    continuous_flag = (args.continuous == "continuous")
     env = gym.make('LunarLander-v3', 
-                   continuous=False,
+                   continuous=continuous_flag,
                    enable_wind=True,
                    wind_power=5,
                    render_mode='human' if args.mode == 'test' else 'rgb_array')
@@ -148,7 +160,7 @@ def main(args):
     if 'train' in args.mode:
         train(env=env, hyperparameters=hyperparameters, actor_model=args.actor_model, critic_model=args.critic_model)
     else:
-        test(env=env, actor_model=args.actor_model)
+        test(env=env, actor_model=args.actor_model, args=args)
 
 if __name__ == '__main__':
     args = get_args() # Parse arguments from command line
