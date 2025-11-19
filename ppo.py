@@ -368,7 +368,7 @@ class PPO:
             # Sum log probs across action dims
             log_probs = dist.log_prob(action).sum(dim=-1)
             # Return the sampled action and the log probability of that action in our distribution
-            return action.detach().numpy(), log_prob.detach()
+            return action.detach().numpy(), log_probs.detach()
 
 
     def evaluate(self, batch_obs, batch_acts):

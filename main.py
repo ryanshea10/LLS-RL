@@ -149,7 +149,7 @@ def main(args):
     # Creates the environment we'll be running. If you want to replace with your own
     # custom environment, note that it must inherit Gym and have both continuous
     # observation and action spaces.
-    continuous_flag = (args.continuous == "continuous")
+    continuous_flag = (args.action_space == "continuous")
     env = gym.make('LunarLander-v3', 
                    continuous=continuous_flag,
                    enable_wind=True,

@@ -73,7 +73,7 @@ def rollout(policy, env, render, action_space: str = "discrete"):
             else:
                 means, log_stds = policy(obs)
                 # Mean for deterministic eval
-                action = mea.detach().numpy()
+                action = means.detach().numpy()
                 # Clip since valid action in continuous Lunar Lander must be in [-1.0, 1.0]
                 action = np.clip(action, -1.0, 1.0)
 
