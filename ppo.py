@@ -448,10 +448,15 @@ class PPO:
         self.ent_coef = 0.01                            # Entropy regularization coefficient
         self.max_grad_norm = 0.5                        # Maximum gradient norm to clip gradients at
         self.lam = 0.97                                  # Lambda for GAE
+        self.action_space = "discrete"
 
         # Change any default values to custom values for specified hyperparameters
         for param, val in hyperparameters.items():
-            exec('self.' + param + ' = ' + str(val))
+            # Dont use exec() pattern for args that have string values
+            if param == "action_space":
+                self.action_space = val
+            else:
+                exec('self.' + param + ' = ' + str(val))
 
         # Sets the seed if specified
         if self.seed != None:
