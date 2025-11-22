@@ -58,6 +58,8 @@ def train(env, hyperparameters, actor_model, critic_model):
         model = PPO_LLS(policy_class=LLS_Model, env=env, **hyperparameters)
     elif args.mode == 'train':
         model = PPO(policy_class=LLS_Model, env=env, **hyperparameters)
+    elif args.mode == 'train_ffnn':
+        model = PPO(policy_class=FeedForwardNN, env=env, **hyperparameters)
     else:
         print(f"Invalid mode: {args.mode}", flush=True)
         sys.exit(0)
