@@ -252,6 +252,13 @@ class PPO:
                 # Note that rew is short for reward.
                 action, log_prob = self.get_action(obs)
                 val = self.critic(obs)
+                
+                # Convert tensors to Python scalars for storage
+                # This prevents issues in GAE calculation with tensor arithmetic
+                if isinstance(val, torch.Tensor):
+                    val = val.squeeze().item()  # Squeeze any extra dims before .item()
+                if isinstance(log_prob, torch.Tensor):
+                    log_prob = log_prob.item()
 
                 obs, rew, terminated, truncated, _ = self.env.step(action)
 

@@ -30,16 +30,16 @@ class FeedForwardNN(nn.Module):
 		self.layer1 = nn.Linear(in_dim, 64)
 		self.layer2 = nn.Linear(64, 64)
 
-		# Final layer output size must change based on action space type
-		if action_space == "discrete":
-			# If discrete action space, output probability distribution over 4 discrete
-			# actions
-			self.layer3 = nn.Linear(64, out_dim)
-		elif action_space == "continuous":
-			# If continuous action space, environment expects output of size 2; FeedForwardNN
-			# outputs means and log stddevs defining a Gaussian over each of these two values
-			# for PPO
+		# Final layer output size must change based on action space type AND whether this is an actor
+		# For continuous action actor: output means and log_stds (double the action_dim)
+		# For discrete action actor: output logits for each action
+		# For critic: always output single value regardless of action space
+		if is_actor and action_space == "continuous":
+			# Continuous actor outputs both means and log_stds
 			self.layer3 = nn.Linear(64, out_dim * 2)
+		else:
+			# Discrete actor, or any critic
+			self.layer3 = nn.Linear(64, out_dim)
 
 	def forward(self, obs):
 		"""
@@ -65,8 +65,9 @@ class FeedForwardNN(nn.Module):
 		if self.is_actor and self.action_space == "continuous":
 			means = output[..., :self.out_dim]
 			log_stds = output[..., self.out_dim:]
-			# TBD: Clamp for stability
-			# log_stds = torch.clamp(log_stds, -20, 2)
+			# Clamp for numerical stability (prevents NaN/Inf)
+			means = torch.clamp(means, -10, 10)
+			log_stds = torch.clamp(log_stds, -20, 2)
 			return means, log_stds
 		# For discrete actor, apply softmax for actor network to get action probabilities
 		if self.is_actor:
