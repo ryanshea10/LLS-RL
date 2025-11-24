@@ -3,7 +3,7 @@ from torch import nn
 from lls_utils import AdamWScheduleFree
 import torch.optim as optim
 from torch.nn import functional as F
-from torch.distributions import Categorical
+from torch.distributions import Categorical, Normal
 from lls_layers import LLS_layer, LinearBlock, layer_pred_LLS
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 import logging
@@ -34,7 +34,7 @@ class LLS_RAY(TorchModelV2, nn.Module):
 
 
 class LLS_Model(nn.Module):
-    def __init__(self, num_inputs, num_outputs, is_actor, *args, **kwargs):
+    def __init__(self, num_inputs, num_outputs, is_actor, action_space: str = "discrete", *args, **kwargs):
         nn.Module.__init__(self)
         
         # Extract parameters from kwargs with defaults
@@ -70,6 +70,7 @@ class LLS_Model(nn.Module):
         self.optimizer = None
         self.is_actor = is_actor # if true, the model is the actor and we want softmax applied to outputs
         self.lr = lr
+        self.action_space = action_space
 
         linear_block1 = LinearBlock(self.in_features, self.hidden)
         self.linear_block1 = LLS_layer(block=linear_block1, lr=lr, n_classes=self.n_classes, momentum=momentum,
@@ -89,7 +90,10 @@ class LLS_Model(nn.Module):
                                      hidden_dim=self.hidden, reduced_set=self.reduced_set, pooling_size=self.hidden,
                                      loss_type=self.loss_type)
 
-        self.linear_out = nn.Linear(self.hidden, num_outputs, bias=bias)
+        if is_actor and action_space == "continuous":
+            self.linear_out = nn.Linear(self.hidden, num_outputs * 2, bias=bias)
+        else:
+            self.linear_out = nn.Linear(self.hidden, num_outputs, bias=bias)
         self.to(device)
 
         # Feedback matrix
@@ -156,34 +160,68 @@ class LLS_Model(nn.Module):
     
     def ppo_update(self, obs, acts, old_layer_log_probs, advantage, old_log_probs, clip, ent_coef, max_grad_norm):
         x, hidden_states = self.online_forward(obs)
-        layer_preds = [Categorical(h.to(device)) for h in hidden_states]
-        layer_log_probs = [lp.log_prob(act.to(device)) for lp, act in zip(layer_preds, acts)]
-        
-        for i in range(len(layer_log_probs)): # calculate ppo loss for each hidden layer
-            log_ratio = layer_log_probs[i] - old_layer_log_probs[i].to(device)
+
+        if self.action_space == "discrete":
+            layer_preds = [Categorical(h.to(device)) for h in hidden_states]
+            layer_log_probs = [lp.log_prob(act.to(device)) for lp, act in zip(layer_preds, acts)]
+            
+            for i in range(len(layer_log_probs)): # calculate ppo loss for each hidden layer
+                log_ratio = layer_log_probs[i] - old_layer_log_probs[i].to(device)
+                ratio = torch.exp(log_ratio)
+                surr1 = ratio * advantage[i]
+                surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage[i]
+                actor_loss = -torch.min(surr1, surr2).mean()
+                entropy_loss = layer_preds[i].entropy().mean()
+                actor_loss = actor_loss - ent_coef * entropy_loss
+                self.optimizer.zero_grad()
+                actor_loss.backward(retain_graph=True)
+                nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
+                self.optimizer.step()
+
+            dist = Categorical(x) # calculate ppo loss for the output layer
+            log_ratio = dist.log_prob(acts.to(device)) - old_log_probs.to(device)
             ratio = torch.exp(log_ratio)
-            surr1 = ratio * advantage[i]
-            surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage[i]
+            surr1 = ratio * advantage.to(device)
+            surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage.to(device)
             actor_loss = -torch.min(surr1, surr2).mean()
-            entropy_loss = layer_preds[i].entropy().mean()
+            entropy_loss = dist.entropy().mean()
             actor_loss = actor_loss - ent_coef * entropy_loss
             self.optimizer.zero_grad()
             actor_loss.backward(retain_graph=True)
             nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
             self.optimizer.step()
 
-        dist = Categorical(x) # calculate ppo loss for the output layer
-        log_ratio = dist.log_prob(acts.to(device)) - old_log_probs.to(device)
-        ratio = torch.exp(log_ratio)
-        surr1 = ratio * advantage.to(device)
-        surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage.to(device)
-        actor_loss = -torch.min(surr1, surr2).mean()
-        entropy_loss = dist.entropy().mean()
-        actor_loss = actor_loss - ent_coef * entropy_loss
-        self.optimizer.zero_grad()
-        actor_loss.backward(retain_graph=True)
-        nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
-        self.optimizer.step()
+        else: # Continuous env
+            # Hidden layer updates (continuous regression)
+            for i, hidden_state in enumerate(hidden_states):
+                # Create regression targets from hidden states
+                # This requires adaptation of layer_pred_LLS for regression
+                # FIXME: Implement `compute_continuous_layer_loss`
+                hidden_loss = self.compute_continuous_layer_loss(
+                    hidden_state, acts, advantage[i]
+                )
+                self.optimizer.zero_grad()
+                hidden_loss.backward(retain_graph=True)
+                nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
+                self.optimizer.step()
+            
+            # Output layer (continuous)
+            means, log_stds = x
+            stds = log_stds.exp()
+            dist = Normal(means, stds)
+            log_probs = dist.log_prob(acts.to(device)).sum(dim=-1)
+            log_ratio = log_probs - old_log_probs.to(device)
+            ratio = torch.exp(log_ratio)
+            surr1 = ratio * advantage.to(device)
+            surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage.to(device)
+            actor_loss = -torch.min(surr1, surr2).mean()
+            entropy_loss = dist.entropy().sum(dim=-1).mean()
+            actor_loss = actor_loss - ent_coef * entropy_loss
+            
+            self.optimizer.zero_grad()
+            actor_loss.backward(retain_graph=True)
+            nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
+            self.optimizer.step()
     
     def online_forward(self, x):
         hidden_states = []
@@ -199,9 +237,18 @@ class LLS_Model(nn.Module):
         hidden_states.append(layer_pred[0].clone())
         x = self.linear_out(x.detach())
 
-        if self.is_actor:
+        if self.is_actor and self.action_space == "discrete":
             hidden_states = [F.softmax(h, dim=-1) for h in hidden_states]
             return F.softmax(x, dim=-1), hidden_states
+        elif self.is_actor:
+            # Split into means and log_stds
+            means = x[..., :self.out_features]
+            log_stds = x[..., self.out_features:]
+            # Clamp for stability
+            means = torch.clamp(means, -2, 2)
+            log_stds = torch.clamp(log_stds, -20, 2)
+            # Keep hidden states as regression outputs for continuous env
+            return (means, log_stds), hidden_states
 
         return x, hidden_states
 
@@ -224,6 +271,13 @@ class LLS_Model(nn.Module):
             loss.backward()
             self.optimizer.step()
         
-        if self.is_actor:
+        if self.is_actor and self.action_space == "discrete":
             return F.softmax(x, dim=-1)
+        elif self.is_actor:
+            means = x[..., :self.out_features]
+            log_stds = x[..., self.out_features:]
+            means = torch.clamp(means, -2, 2)
+            log_stds = torch.clamp(log_stds, -20, 2)
+            return means, log_stds
+
         return x

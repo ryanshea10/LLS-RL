@@ -6,7 +6,7 @@ import time
 import torch
 import torch.nn as nn
 from torch.optim import Adam
-from torch.distributions import Categorical
+from torch.distributions import Categorical, Normal
 
 class PPO_LLS:
     """
@@ -24,9 +24,19 @@ class PPO_LLS:
             Returns:
                 None
         """
+
+        self.action_space = hyperparameters.get('action_space')
+        if self.action_space is None:
+            raise ValueError(
+                "action_space must be included in hyperparameters used to initialize PPO_LLS()"
+            )
+
         # Make sure the environment is compatible with our code
         assert(type(env.observation_space) == gym.spaces.Box)
-        assert(type(env.action_space) == gym.spaces.Discrete)
+        if self.action_space == "discrete":
+            assert(type(env.action_space) == gym.spaces.Discrete)
+        else:
+            assert(type(env.action_space) == gym.spaces.Box)
 
         # Initialize hyperparameters for training with PPO
         self._init_hyperparameters(hyperparameters)
@@ -34,12 +44,20 @@ class PPO_LLS:
         # Extract environment information
         self.env = env
         self.obs_dim = env.observation_space.shape[0]
-        self.act_dim = env.action_space.n  # Number of discrete actions
+        if self.action_space == "discrete":
+            self.act_dim = env.action_space.n  # Number of discrete actions
+        else:
+            self.act_dim = env.action_space.shape[0] # Continuous actions
 
         # Initialize actor and critic networks
-        self.actor = policy_class(self.obs_dim, self.act_dim, is_actor=True, training_mode="PPO_LLS_MxM", optimizer="AdamWSF")  # ALG STEP 1
-        self.critic = policy_class(self.obs_dim, 1, is_actor=False, training_mode="LLS_MxM", optimizer="AdamWSF", loss_type='mse',
-                                  lr=hyperparameters['lr'])
+        self.actor = policy_class(
+            self.obs_dim, self.act_dim, is_actor=True, 
+            action_space=self.action_space,
+            training_mode="PPO_LLS_MxM", optimizer="AdamWSF")  # ALG STEP 1
+        self.critic = policy_class(
+            self.obs_dim, 1, is_actor=False, 
+            action_space=self.action_space, training_mode="LLS_MxM", 
+            optimizer="AdamWSF", loss_type='mse', lr=hyperparameters['lr'])
 
         # This logger will help us with printing out summaries of each iteration
         self.logger = {
@@ -232,7 +250,12 @@ class PPO_LLS:
 
         # Reshape data as tensors in the shape specified in function description, before returning
         batch_obs = torch.tensor(np.array(batch_obs), dtype=torch.float)
-        batch_acts = torch.tensor(np.array(batch_acts), dtype=torch.long)  # Convert to numpy array first
+
+        if self.action_space == "discrete":
+            batch_acts = torch.tensor(np.array(batch_acts), dtype=torch.long)  # Convert to numpy array first
+        else:
+            batch_acts = torch.tensor(np.array(batch_acts), dtype=torch.float)
+
         batch_log_probs = torch.tensor(np.array(batch_log_probs), dtype=torch.float)
         batch_layer_log_probs = torch.tensor(np.array(batch_layer_log_probs), dtype=torch.float)
 
@@ -303,22 +326,37 @@ class PPO_LLS:
                 action - the action to take, as a numpy array
                 log_prob - the log probability of the selected action in the distribution
         """
-        # Query the actor network for action probabilities
-        action_probs, hidden_states = self.actor(obs)
-        layer_preds = [Categorical(h) for h in hidden_states]
 
-        # Create a categorical distribution with the action probabilities
-        dist = Categorical(action_probs)
+        if self.action_space == "discrete":
+            # Query the actor network for action probabilities
+            action_probs, hidden_states = self.actor(obs)
+            layer_preds = [Categorical(h) for h in hidden_states]
 
-        # Sample an action from the distribution
-        action = dist.sample()
+            # Create a categorical distribution with the action probabilities
+            dist = Categorical(action_probs)
 
-        # Calculate the log probability for that action
-        log_prob = dist.log_prob(action)
-        layer_log_probs = [lp.log_prob(action).cpu().detach() for lp in layer_preds]
+            # Sample an action from the distribution
+            action = dist.sample()
 
-        # Return the sampled action and the log probability of that action in our distribution
-        return action.cpu().detach().numpy(), log_prob.cpu().detach(), layer_log_probs
+            # Calculate the log probability for that action
+            log_prob = dist.log_prob(action)
+            layer_log_probs = [lp.log_prob(action).cpu().detach() for lp in layer_preds]
+
+            # Return the sampled action and the log probability of that action in our distribution
+            return action.cpu().detach().numpy(), log_prob.cpu().detach(), layer_log_probs
+
+        else: # Continuous env
+            (means, log_stds), hidden_states = self.actor(obs)
+            stds = log_stds.exp()
+            dist = Normal(means, stds)
+            action = dist.sample()
+            log_prob = dist.log_prob(action).sum(dim=-1)
+            
+            # For continuous env, hidden states are regression outputs
+            # FIXME: Layer log probs need different computation (TBD based on LLS method)
+            layer_log_probs = []  # Placeholder
+            
+            return action.cpu().detach().numpy(), log_prob.cpu().detach(), layer_log_probs
 
     def evaluate(self, batch_obs, batch_acts):
         """
@@ -339,14 +377,22 @@ class PPO_LLS:
         # Query critic network for a value V for each batch_obs
         V = self.critic(batch_obs).squeeze()
 
-        # Calculate the log probabilities of batch actions using most recent actor network
-        action_probs = self.actor(batch_obs)
-        dist = Categorical(action_probs)
-        log_probs = dist.log_prob(batch_acts)
+        if self.action_space == "discrete":
+            # Calculate the log probabilities of batch actions using most recent actor network
+            action_probs = self.actor(batch_obs)
+            dist = Categorical(action_probs)
+            log_probs = dist.log_prob(batch_acts)
+            entropy = dist.entropy()
+        else:
+            (means, log_stds), _ = self.actor(batch_obs)
+            stds = log_stds.exp()
+            dist = Normal(means, stds)
+            log_probs = dist.log_prob(batch_acts).sum(dim=-1)
+            entropy = dist.entropy().sum(dim=-1)
 
         # Return the value vector V of each observation in the batch
         # and log probabilities log_probs of each action in the batch
-        return V, log_probs, dist.entropy()
+        return V, log_probs, entropy
 
     def _init_hyperparameters(self, hyperparameters):
         """
