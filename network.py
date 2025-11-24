@@ -66,7 +66,7 @@ class FeedForwardNN(nn.Module):
 			means = output[..., :self.out_dim]
 			log_stds = output[..., self.out_dim:]
 			# Clamp for numerical stability (prevents NaN/Inf)
-			means = torch.clamp(means, -10, 10)
+			means = torch.clamp(means, -2, 2)
 			log_stds = torch.clamp(log_stds, -20, 2)
 			return means, log_stds
 		# For discrete actor, apply softmax for actor network to get action probabilities

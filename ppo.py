@@ -381,11 +381,9 @@ class PPO:
             dist = Normal(means, stds)
             # Sample action from the distribution
             action = dist.sample()
-            # Clamp to valid range for continuous Lunar Lander
-            action = torch.clamp(action, -1.0, 1.0)
-            # Sum log probs across action dims
+            # Calculate log probability of the sampled action
             log_probs = dist.log_prob(action).sum(dim=-1)
-            # Return the sampled action and the log probability of that action in our distribution
+            # Return the sampled action and the log probability
             return action.detach().numpy(), log_probs.detach()
 
 
