@@ -118,6 +118,11 @@ class PPO_LLS:
 
             # Calculate advantage at k-th iteration
             A_k = self.calculate_gae(batch_rews, batch_vals, batch_dones)
+
+            # For LLS with continuous actions, create per-layer advantages
+            # Use the same advantage for all layers (shared learning signal)
+            num_layers = 2  # linear_block1 and linear_block2
+
             V = self.critic(batch_obs).squeeze()
             batch_rtgs = V.cpu().detach() + A_k.cpu()
 
@@ -143,8 +148,11 @@ class PPO_LLS:
                     mini_rtgs = batch_rtgs[idx]
                     mini_layer_log_probs = batch_layer_log_probs[idx]
 
-                    self.actor.ppo_update(mini_obs, mini_acts, mini_layer_log_probs, mini_advantage, mini_log_prob, 
-                                          self.clip, self.ent_coef, self.max_grad_norm)
+                    # Create per-layer advantages for continuous actions
+                    mini_advantage_layers = [mini_advantage.clone() for _ in range(num_layers)]
+
+                    self.actor.ppo_update(mini_obs, mini_acts, mini_layer_log_probs, mini_advantage_layers, mini_log_prob, 
+                                        self.clip, self.ent_coef, self.max_grad_norm)
                     # V = self.critic(mini_obs, labels=mini_rtgs)
                     V = self.critic(mini_obs, labels=mini_rtgs.view(-1, 1))
 
@@ -259,7 +267,7 @@ class PPO_LLS:
         batch_log_probs = torch.tensor(np.array(batch_log_probs), dtype=torch.float)
         batch_layer_log_probs = torch.tensor(np.array(batch_layer_log_probs), dtype=torch.float)
 
-        # Log the episodic returns and episodic lengths in this batch.
+        # Log the episodic returns and episodic lengths in this batch
         self.logger['batch_rews'] = batch_rews
         self.logger['batch_lens'] = batch_lens
 
@@ -352,9 +360,21 @@ class PPO_LLS:
             action = dist.sample()
             log_prob = dist.log_prob(action).sum(dim=-1)
             
-            # For continuous env, hidden states are regression outputs
-            # FIXME: Layer log probs need different computation (TBD based on LLS method)
-            layer_log_probs = []  # Placeholder
+            # Compute layer log probabilities from hidden state action parameters
+            layer_log_probs = []
+            for action_params in hidden_states:
+                # Split action_params into means and log_stds
+                action_dim = action.shape[-1] if action.dim() > 0 else 1
+                h_means = action_params[..., :action_dim]
+                h_log_stds = action_params[..., action_dim:]
+                h_means = torch.clamp(h_means, -2, 2)
+                h_log_stds = torch.clamp(h_log_stds, -20, 2)
+                h_stds = h_log_stds.exp()
+                
+                # Create distribution and compute log prob
+                h_dist = Normal(h_means, h_stds)
+                h_log_prob = h_dist.log_prob(action).sum(dim=-1)
+                layer_log_probs.append(h_log_prob.cpu().detach())
             
             return action.cpu().detach().numpy(), log_prob.cpu().detach(), layer_log_probs
 

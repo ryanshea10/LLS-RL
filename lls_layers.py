@@ -3,6 +3,7 @@ from torch import nn
 from lls_utils import AdamWScheduleFree, SGDScheduleFree
 import torch.optim as optim
 from torch.nn import functional as F
+from torch.distributions import Normal
 import numpy as np
 
 __all__ = ["LLS_layer", "LinearBlock", "ConvBlock", "ConvDWBlock"]
@@ -223,6 +224,58 @@ class LLS_layer(nn.Module):
         loss.backward()
         self.optimizer.step()
         self.record_statistics(loss.detach(), out.size(0))
+
+    def layer_update_continuous_ppo(self, action_params, actions, old_log_probs, advantage, clip, ent_coef, max_grad_norm):
+        """
+        Layer-wise PPO update for continuous actions using Gaussian distributions.
+        
+        Parameters:
+            action_params: Tensor of shape [batch, action_dim * 2] containing means and log_stds
+            actions: Actual actions taken [batch, action_dim]
+            old_log_probs: Log probabilities from previous policy [batch]
+            advantage: Advantage estimates [batch]
+            clip: PPO clip parameter
+            ent_coef: Entropy coefficient
+            max_grad_norm: Maximum gradient norm for clipping
+        """
+        
+        # Split into means and log_stds
+        action_dim = actions.shape[-1]
+        means = action_params[..., :action_dim]
+        log_stds = action_params[..., action_dim:]
+        
+        # Clamp for stability
+        means = torch.clamp(means, -2, 2)
+        log_stds = torch.clamp(log_stds, -20, 2)
+        stds = log_stds.exp()
+        
+        # Create Normal distribution
+        dist = Normal(means, stds)
+        
+        # Compute log probability of the taken actions
+        log_prob = dist.log_prob(actions).sum(dim=-1)
+        
+        # PPO loss calculation
+        log_ratio = log_prob - old_log_probs
+        ratio = torch.exp(log_ratio)
+        surr1 = ratio * advantage
+        surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage
+        actor_loss = -torch.min(surr1, surr2).mean()
+        
+        # Entropy regularization
+        entropy_loss = dist.entropy().sum(dim=-1).mean()
+        actor_loss = actor_loss - ent_coef * entropy_loss
+        
+        # Update
+        self.optimizer.zero_grad()
+        actor_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.block.parameters(), max_grad_norm)
+        self.optimizer.step()
+        
+        # Record statistics
+        self.record_statistics(actor_loss.detach(), actions.size(0))
+        
+        return actor_loss
 
     def forward(self, x, labels=None, feedback=None, x_err=None):
         training = self.training

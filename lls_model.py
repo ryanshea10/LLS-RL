@@ -94,6 +94,14 @@ class LLS_Model(nn.Module):
             self.linear_out = nn.Linear(self.hidden, num_outputs * 2, bias=bias)
         else:
             self.linear_out = nn.Linear(self.hidden, num_outputs, bias=bias)
+
+        # If using continuous action space, need projection heads from hidden layers to action space
+        if is_actor and action_space == "continuous":
+            # Project hidden layer 1 output to (means, log_stds)
+            self.layer1_to_action = nn.Linear(self.hidden, num_outputs * 2, bias=bias)
+            # Project hidden layer 2 output to (means, log_stds)
+            self.layer2_to_action = nn.Linear(self.hidden, num_outputs * 2, bias=bias)
+        
         self.to(device)
 
         # Feedback matrix
@@ -192,18 +200,28 @@ class LLS_Model(nn.Module):
             self.optimizer.step()
 
         else: # Continuous env
-            # Hidden layer updates (continuous regression)
-            for i, hidden_state in enumerate(hidden_states):
-                # Create regression targets from hidden states
-                # This requires adaptation of layer_pred_LLS for regression
-                # FIXME: Implement `compute_continuous_layer_loss`
-                hidden_loss = self.compute_continuous_layer_loss(
-                    hidden_state, acts, advantage[i]
-                )
-                self.optimizer.zero_grad()
-                hidden_loss.backward(retain_graph=True)
-                nn.utils.clip_grad_norm_(self.parameters(), max_grad_norm)
-                self.optimizer.step()
+            # Delegate layer-wise updates to the LLS_layer instances
+            # Layer 1 update
+            self.linear_block1.layer_update_continuous_ppo(
+                hidden_states[0].to(device), 
+                acts.to(device), 
+                old_layer_log_probs[0].to(device),
+                advantage[0].to(device),
+                clip, 
+                ent_coef, 
+                max_grad_norm
+            )
+            
+            # Layer 2 update
+            self.linear_block2.layer_update_continuous_ppo(
+                hidden_states[1].to(device), 
+                acts.to(device), 
+                old_layer_log_probs[1].to(device),
+                advantage[1].to(device),
+                clip, 
+                ent_coef, 
+                max_grad_norm
+            )
             
             # Output layer (continuous)
             means, log_stds = x
@@ -228,26 +246,45 @@ class LLS_Model(nn.Module):
         x = x.to(device)
 
         x = self.linear_block1(x)
-        layer_pred = layer_pred_LLS(x, act_size=self.hidden, n_classes=self.n_classes, modulation_term=self.linear_block1.feedback, 
-                                    modulation=self.linear_block1.modulation_mode, freq=None, waveform=self.waveform)
-        hidden_states.append(layer_pred[0].clone())
+        layer_pred = layer_pred_LLS(x, act_size=self.hidden, n_classes=self.n_classes, 
+                                    modulation_term=self.linear_block1.feedback, 
+                                    modulation=self.linear_block1.modulation_mode, 
+                                    freq=None, waveform=self.waveform)
+        
+        if self.is_actor and self.action_space == "continuous":
+            # Project to action space (means + log_stds)
+            action_pred = self.layer1_to_action(layer_pred[0].clone())
+            hidden_states.append(action_pred)
+        else:
+            hidden_states.append(layer_pred[0].clone())
+        
         x = self.linear_block2(x.detach()) 
-        layer_pred = layer_pred_LLS(x, act_size=self.hidden, n_classes=self.n_classes, modulation_term=self.linear_block2.feedback, 
-                                    modulation=self.linear_block2.modulation_mode, freq=None, waveform=self.waveform)
-        hidden_states.append(layer_pred[0].clone())
+        layer_pred = layer_pred_LLS(x, act_size=self.hidden, n_classes=self.n_classes, 
+                                    modulation_term=self.linear_block2.feedback, 
+                                    modulation=self.linear_block2.modulation_mode, 
+                                    freq=None, waveform=self.waveform)
+        
+        if self.is_actor and self.action_space == "continuous":
+            # Project to action space (means + log_stds)
+            action_pred = self.layer2_to_action(layer_pred[0].clone())
+            hidden_states.append(action_pred)
+        else:
+            hidden_states.append(layer_pred[0].clone())
+        
         x = self.linear_out(x.detach())
 
         if self.is_actor and self.action_space == "discrete":
             hidden_states = [F.softmax(h, dim=-1) for h in hidden_states]
             return F.softmax(x, dim=-1), hidden_states
         elif self.is_actor:
-            # Split into means and log_stds
+            # Output layer: split into means and log_stds
             means = x[..., :self.out_features]
             log_stds = x[..., self.out_features:]
-            # Clamp for stability
             means = torch.clamp(means, -2, 2)
             log_stds = torch.clamp(log_stds, -20, 2)
-            # Keep hidden states as regression outputs for continuous env
+            
+            # Hidden states already contain raw action parameters (means + log_stds concatenated)
+            # No need to process them here - they'll be processed in layer_update_continuous_ppo
             return (means, log_stds), hidden_states
 
         return x, hidden_states
