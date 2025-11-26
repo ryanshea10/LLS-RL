@@ -175,7 +175,7 @@ class LLS_Model(nn.Module):
             layer_log_probs = [lp.log_prob(act.to(device)) for lp, act in zip(layer_preds, acts)]
             
             for i in range(len(layer_log_probs)): # calculate ppo loss for each hidden layer
-                log_ratio = layer_log_probs[i] - old_layer_log_probs[i].to(device)
+                log_ratio = layer_log_probs[i] - old_layer_log_probs[:, i].to(device)
                 ratio = torch.exp(log_ratio)
                 surr1 = ratio * advantage[i]
                 surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage[i]
@@ -190,8 +190,8 @@ class LLS_Model(nn.Module):
             dist = Categorical(x) # calculate ppo loss for the output layer
             log_ratio = dist.log_prob(acts.to(device)) - old_log_probs.to(device)
             ratio = torch.exp(log_ratio)
-            surr1 = ratio * advantage.to(device)
-            surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage.to(device)
+            surr1 = ratio * advantage
+            surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage
             actor_loss = -torch.min(surr1, surr2).mean()
             entropy_loss = dist.entropy().mean()
             actor_loss = actor_loss - ent_coef * entropy_loss
@@ -206,8 +206,8 @@ class LLS_Model(nn.Module):
             self.linear_block1.layer_update_continuous_ppo(
                 hidden_states[0].to(device), 
                 acts.to(device), 
-                old_layer_log_probs[0].to(device),
-                advantage[0].to(device),
+                old_layer_log_probs[:, 0].to(device),
+                advantage[0],
                 clip, 
                 ent_coef, 
                 max_grad_norm
@@ -217,8 +217,8 @@ class LLS_Model(nn.Module):
             self.linear_block2.layer_update_continuous_ppo(
                 hidden_states[1].to(device), 
                 acts.to(device), 
-                old_layer_log_probs[1].to(device),
-                advantage[1].to(device),
+                old_layer_log_probs[:, 1].to(device),
+                advantage[1],
                 clip, 
                 ent_coef, 
                 max_grad_norm
@@ -231,8 +231,8 @@ class LLS_Model(nn.Module):
             log_probs = dist.log_prob(acts.to(device)).sum(dim=-1)
             log_ratio = log_probs - old_log_probs.to(device)
             ratio = torch.exp(log_ratio)
-            surr1 = ratio * advantage.to(device)
-            surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage.to(device)
+            surr1 = ratio * advantage
+            surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage
             actor_loss = -torch.min(surr1, surr2).mean()
             entropy_loss = dist.entropy().sum(dim=-1).mean()
             actor_loss = actor_loss - ent_coef * entropy_loss
