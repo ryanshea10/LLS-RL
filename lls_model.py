@@ -114,6 +114,32 @@ class LLS_Model(nn.Module):
             else:
                 params_dict = [{"params": self.linear_out.parameters()}]
 
+            # For continuous action space, create separate optimizers for projection heads
+            if is_actor and action_space == "continuous" and "PPO" in training_mode:
+                if optimizer == "SGD":
+                    self.layer1_proj_optimizer = optim.SGD(
+                        self.layer1_to_action.parameters(),
+                        lr=lr, momentum=momentum,
+                        weight_decay=weight_decay, nesterov=nesterov)
+                    self.layer2_proj_optimizer = optim.SGD(
+                        self.layer2_to_action.parameters(),
+                        lr=lr, momentum=momentum,
+                        weight_decay=weight_decay, nesterov=nesterov)
+
+                elif optimizer == "Adam":
+                    self.layer1_proj_optimizer = optim.Adam(self.layer1_to_action.parameters(),
+                        lr=lr, weight_decay=weight_decay)
+                    self.layer2_proj_optimizer = optim.Adam(self.layer2_to_action.parameters(),
+                        lr=lr, weight_decay=weight_decay)
+
+                elif optimizer == "AdamWSF":
+                    self.layer1_proj_optimizer = AdamWScheduleFree(
+                        self.layer1_to_action.parameters(),
+                        lr=lr, weight_decay=weight_decay)
+                    self.layer2_proj_optimizer = AdamWScheduleFree(
+                        self.layer2_to_action.parameters(),
+                        lr=lr, weight_decay=weight_decay)
+
             if optimizer == "SGD":
                 self.optimizer = optim.SGD(params_dict, lr=lr, momentum=momentum, weight_decay=weight_decay,
                                            nesterov=nesterov)
@@ -190,8 +216,9 @@ class LLS_Model(nn.Module):
             dist = Categorical(x) # calculate ppo loss for the output layer
             log_ratio = dist.log_prob(acts.to(device)) - old_log_probs.to(device)
             ratio = torch.exp(log_ratio)
-            surr1 = ratio * advantage
-            surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage
+            # Use same advantage as layers (they're all the same, just use first one)
+            surr1 = ratio * advantage[0].to(device)
+            surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage[0].to(device)
             actor_loss = -torch.min(surr1, surr2).mean()
             entropy_loss = dist.entropy().mean()
             actor_loss = actor_loss - ent_coef * entropy_loss
@@ -203,6 +230,7 @@ class LLS_Model(nn.Module):
         else: # Continuous env
             # Delegate layer-wise updates to the LLS_layer instances
             # Layer 1 update
+            self.layer1_proj_optimizer.zero_grad()
             self.linear_block1.layer_update_continuous_ppo(
                 hidden_states[0].to(device), 
                 acts.to(device), 
@@ -212,8 +240,13 @@ class LLS_Model(nn.Module):
                 ent_coef, 
                 max_grad_norm
             )
+
+            # Update layer 1's projection head (gradients computed by layer_update_continuous_ppo)
+            nn.utils.clip_grad_norm_(self.layer1_to_action.parameters(), max_grad_norm)
+            self.layer1_proj_optimizer.step()
             
             # Layer 2 update
+            self.layer2_proj_optimizer.zero_grad()
             self.linear_block2.layer_update_continuous_ppo(
                 hidden_states[1].to(device), 
                 acts.to(device), 
@@ -223,6 +256,10 @@ class LLS_Model(nn.Module):
                 ent_coef, 
                 max_grad_norm
             )
+
+            # Update layer 2's projection head (gradients computed by layer_update_continuous_ppo)
+            nn.utils.clip_grad_norm_(self.layer2_to_action.parameters(), max_grad_norm)
+            self.layer2_proj_optimizer.step()
             
             # Output layer (continuous)
             means, log_stds = x
@@ -231,8 +268,9 @@ class LLS_Model(nn.Module):
             log_probs = dist.log_prob(acts.to(device)).sum(dim=-1)
             log_ratio = log_probs - old_log_probs.to(device)
             ratio = torch.exp(log_ratio)
-            surr1 = ratio * advantage
-            surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage
+            # Use same advantage as layers (they're all the same, just use first one)
+            surr1 = ratio * advantage[0].to(device)
+            surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage[0].to(device)
             actor_loss = -torch.min(surr1, surr2).mean()
             entropy_loss = dist.entropy().sum(dim=-1).mean()
             actor_loss = actor_loss - ent_coef * entropy_loss
@@ -253,8 +291,9 @@ class LLS_Model(nn.Module):
                                     freq=None, waveform=self.waveform)
         
         if self.is_actor and self.action_space == "continuous":
-            # Project to action space (means + log_stds)
-            action_pred = self.layer1_to_action(layer_pred[0].clone())
+            # Project hidden activations (not LLS predictions) to action space (means + log_stds)
+            # Use x (the hidden layer output) which has shape [batch, 64]
+            action_pred = self.layer1_to_action(x.clone())
             hidden_states.append(action_pred)
         else:
             hidden_states.append(layer_pred[0].clone())
@@ -266,8 +305,9 @@ class LLS_Model(nn.Module):
                                     freq=None, waveform=self.waveform)
         
         if self.is_actor and self.action_space == "continuous":
-            # Project to action space (means + log_stds)
-            action_pred = self.layer2_to_action(layer_pred[0].clone())
+            # Project hidden activations (not LLS predictions) to action space (means + log_stds)
+            # Use x (the hidden layer output) which has shape [batch, 64]
+            action_pred = self.layer2_to_action(x.clone())
             hidden_states.append(action_pred)
         else:
             hidden_states.append(layer_pred[0].clone())
