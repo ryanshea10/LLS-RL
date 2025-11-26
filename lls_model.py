@@ -293,7 +293,8 @@ class LLS_Model(nn.Module):
         if self.is_actor and self.action_space == "continuous":
             # Project hidden activations (not LLS predictions) to action space (means + log_stds)
             # Use x (the hidden layer output) which has shape [batch, 64]
-            action_pred = self.layer1_to_action(x.clone())
+            # Detach to prevent gradients from flowing back into LLS layer
+            action_pred = self.layer1_to_action(x.detach())
             hidden_states.append(action_pred)
         else:
             hidden_states.append(layer_pred[0].clone())
@@ -307,7 +308,7 @@ class LLS_Model(nn.Module):
         if self.is_actor and self.action_space == "continuous":
             # Project hidden activations (not LLS predictions) to action space (means + log_stds)
             # Use x (the hidden layer output) which has shape [batch, 64]
-            action_pred = self.layer2_to_action(x.clone())
+            action_pred = self.layer2_to_action(x.detach())
             hidden_states.append(action_pred)
         else:
             hidden_states.append(layer_pred[0].clone())
