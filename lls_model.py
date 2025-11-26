@@ -95,8 +95,9 @@ class LLS_Model(nn.Module):
         else:
             self.linear_out = nn.Linear(self.hidden, num_outputs, bias=bias)
 
-        # If using continuous action space, need projection heads from hidden layers to action space
-        if is_actor and action_space == "continuous":
+        # If using continuous action space with PPO training, need projection heads from hidden layers to action space
+        # Not necessary for standard backprop (--mode train)
+        if is_actor and action_space == "continuous" and "PPO" in training_mode:
             # Project hidden layer 1 output to (means, log_stds)
             self.layer1_to_action = nn.Linear(self.hidden, num_outputs * 2, bias=bias)
             # Project hidden layer 2 output to (means, log_stds)
