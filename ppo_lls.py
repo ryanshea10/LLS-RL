@@ -50,14 +50,19 @@ class PPO_LLS:
             self.act_dim = env.action_space.shape[0] # Continuous actions
 
         # Initialize actor and critic networks
+        if self.action_space == "discrete":
+            optimizer_name = "AdamWSF"
+        else:
+            optimizer_name = "Adam"
+
         self.actor = policy_class(
             self.obs_dim, self.act_dim, is_actor=True, 
             action_space=self.action_space,
-            training_mode="PPO_LLS_MxM", optimizer="AdamWSF")  # ALG STEP 1
+            training_mode="PPO_LLS_MxM", optimizer=optimizer_name)  # ALG STEP 1
         self.critic = policy_class(
             self.obs_dim, 1, is_actor=False, 
             action_space=self.action_space, training_mode="LLS_MxM", 
-            optimizer="AdamWSF", loss_type='mse', lr=hyperparameters['lr'])
+            optimizer=optimizer_name, loss_type='mse', lr=hyperparameters['lr'])
 
         # This logger will help us with printing out summaries of each iteration
         self.logger = {
@@ -123,8 +128,17 @@ class PPO_LLS:
             # Use the same advantage for all layers (shared learning signal)
             num_layers = 2  # linear_block1 and linear_block2
 
+            # Compute value targets before normalizing advantages
             V = self.critic(batch_obs).squeeze()
             batch_rtgs = V.cpu().detach() + A_k.cpu()
+
+            # # Debug: Check advantage magnitudes
+            # if A_k.abs().max() > 100:
+            #     print(f"WARNING: Large advantages in batch! Range: [{A_k.min()}, {A_k.max()}], std={A_k.std()}")
+            # Normalize advantages at BATCH level (not mini-batch level to avoid std=0)
+            A_k = (A_k - A_k.mean()) / (A_k.std() + 1e-8)
+            # Clip advantages to prevent extreme values
+            A_k = torch.clamp(A_k, -10, 10)
 
             step = batch_obs.size(0)
             inds = np.arange(step)
@@ -356,6 +370,11 @@ class PPO_LLS:
         else: # Continuous env
             (means, log_stds), hidden_states = self.actor(obs)
             stds = log_stds.exp()
+
+            # Check for policy collapse
+            if (stds < 0.01).any():
+                print(f"WARNING: Policy collapse! Min std={stds.min():.6f}")
+
             dist = Normal(means, stds)
             action = dist.sample()
             log_prob = dist.log_prob(action).sum(dim=-1)
@@ -368,7 +387,8 @@ class PPO_LLS:
                 h_means = action_params[..., :action_dim]
                 h_log_stds = action_params[..., action_dim:]
                 h_means = torch.clamp(h_means, -2, 2)
-                h_log_stds = torch.clamp(h_log_stds, -20, 2)
+                # Clamp to enforce minimum std of 0.1 to prevent policy collapse
+                h_log_stds = torch.clamp(h_log_stds, -2.3, 2)
                 h_stds = h_log_stds.exp()
                 
                 # Create distribution and compute log prob
@@ -443,6 +463,7 @@ class PPO_LLS:
         self.ent_coef = 0.01                            # Entropy regularization coefficient
         self.max_grad_norm = 0.5                        # Maximum gradient norm to clip gradients at
         self.lam = 0.97                                  # Lambda for GAE
+        self.action_space = "discrete"
 
         # Change any default values to custom values for specified hyperparameters
         for param, val in hyperparameters.items():
@@ -451,6 +472,12 @@ class PPO_LLS:
                 self.action_space = val
             else:
                 exec('self.' + param + ' = ' + str(val))
+
+        # Set higher entropy coefficient and fewer updates per iter if action space is continuous 
+        # to prevent policy drift/collapse
+        if self.action_space == "continuous":
+            self.ent_coef = 0.1
+            self.n_updates_per_iteration = 3
 
         # Sets the seed if specified
         if self.seed != None:

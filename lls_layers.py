@@ -246,7 +246,8 @@ class LLS_layer(nn.Module):
         
         # Clamp for stability
         means = torch.clamp(means, -2, 2)
-        log_stds = torch.clamp(log_stds, -20, 2)
+        # Clamp to enforce minimum std of 0.1 to prevent policy collapse
+        log_stds = torch.clamp(log_stds, -2.3, 2)
         stds = log_stds.exp()
         
         # Create Normal distribution
