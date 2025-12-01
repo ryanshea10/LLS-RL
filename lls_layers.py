@@ -38,13 +38,23 @@ def compute_LocalLosses(activation, labels, local_classifier, temperature=1, lab
     loss = torch.nn.functional.cross_entropy(layer_pred / temperature, labels, label_smoothing=label_smoothing)
     return loss
 
-def layer_pred_LLS(activation, act_size=1, n_classes=10, modulation_term=None, modulation=False, freq=None, waveform="cosine"):
+def layer_pred_LLS(activation, act_size=1, n_classes=10, modulation_term=None, modulation=False, freq=None, waveform="cosine", action_space="discrete"):
+    """
+    Generate layer predictions using Local Learning Signals (LLS).
+    
+    For discrete: outputs class logits [batch, n_classes]
+    For continuous: outputs Gaussian parameters [batch, n_classes * 2] where first half is means, second half is log_stds
+    """
     batch_size = activation.size(0) if activation.dim() > 1 else 1
     if activation.dim() == 4:
         latents = F.adaptive_avg_pool2d(activation, (act_size, act_size)).view(batch_size, -1)
     else:
         latents = F.adaptive_avg_pool1d(activation.view(batch_size, -1), act_size).view(batch_size, -1)
-    basis = generate_frequency_matrix(n_classes, latents.size(1), max_freq=512, freq=freq).to(device)
+    
+    # For continuous, we need twice as many outputs (means + log_stds)
+    output_dim = n_classes * 2 if action_space == "continuous" else n_classes
+    
+    basis = generate_frequency_matrix(output_dim, latents.size(1), max_freq=512, freq=freq).to(device)
     # basis = generate_frequency_matrix(n_classes, latents.size(1), max_freq=latents.size(1) - 50).to(device)
     if waveform == "square":
         basis = torch.sign(basis)
@@ -59,9 +69,30 @@ def layer_pred_LLS(activation, act_size=1, n_classes=10, modulation_term=None, m
     return layer_pred
 
 def compute_LLS(activation, labels, temperature=1, label_smoothing=0.0, act_size=1, n_classes=10,
-                modulation_term=None, modulation=False, freq=None, waveform="cosine", loss_type="cross_entropy"):
-    layer_pred = layer_pred_LLS(activation, act_size, n_classes, modulation_term, modulation, freq, waveform)
-    if loss_type == "cross_entropy":
+                modulation_term=None, modulation=False, freq=None, waveform="cosine", loss_type="cross_entropy", action_space="discrete"):
+    """
+    Compute LLS loss.
+    For discrete: labels are class indices, loss is cross-entropy
+    For continuous: labels are actions [batch, action_dim], loss is negative log-likelihood of Gaussian
+    """
+
+    layer_pred = layer_pred_LLS(activation, act_size, n_classes, modulation_term, modulation, freq, waveform, action_space)
+    if action_space == "continuous":
+        # For continuous, layer_pred is [batch, action_dim * 2]
+        # Split into means and log_stds
+        action_dim = n_classes # n_classes is actually action_dim for continuous
+        means = layer_pred[..., :action_dim]
+        log_stds = layer_pred[..., action_dim:]
+        # Clamp for stability
+        means = torch.clamp(means, -2, 2)
+        log_stds = torch.clamp(log_stds, -2.3, 2) # Min std of 0.1
+        stds = log_stds.exp()
+        # Compute negative log-likelihood
+        # NLL = 0.5 * log(2π) + log(std) + 0.5 * ((action - mean) / std)^2
+        dist = Normal(means, stds)
+        log_prob = dist.log_prob(labels.to(device))
+        loss = -log_prob.sum(dim=-1).mean() # Negative log likelihood
+    elif loss_type == "cross_entropy":
         loss = torch.nn.functional.cross_entropy(layer_pred / temperature, labels, label_smoothing=label_smoothing)
     elif loss_type == "mse":
         loss = torch.nn.functional.mse_loss(layer_pred, labels.to(device))
@@ -101,7 +132,8 @@ class LLS_layer(nn.Module):
     def __init__(self, block:nn.Module, lr=1e-1, n_classes=10, momentum=0, weight_decay=0,
                  nesterov=False, optimizer="SGD", milestones=[10, 30, 50], gamma=0.1, training_mode="LLS",
                  lr_scheduler = "MultiStepLR", patience=20, temperature=1, label_smoothing=0.0, dropout=0.0,
-                 waveform="cosine", hidden_dim = 2048, reduced_set=20, pooling_size = 4, scaler = False, loss_type="cross_entropy"):
+                 waveform="cosine", hidden_dim = 2048, reduced_set=20, pooling_size = 4, scaler = False, loss_type="cross_entropy",
+                 action_space="discrete"):
         super(LLS_layer, self).__init__()
         self.block = block
         self.lr = lr
@@ -122,33 +154,37 @@ class LLS_layer(nn.Module):
         self.pooling_size = pooling_size
         self.scaler = None
         self.loss_type = loss_type
+        self.action_space = action_space
         self.feedback = None
         self.modulation = None
         self.modulation_mode = None
 
+        # For continuous actions, output dimension is n_classes * 2 (means + log_stds)
+        output_dim = n_classes * 2 if action_space == "continuous" else n_classes
+
         if  "LocalLosses" in self.training_mode:
-            self.feedback = nn.Parameter(torch.Tensor(0.1 * torch.randn([n_classes, hidden_dim])), requires_grad=True)
+            self.feedback = nn.Parameter(torch.Tensor(0.1 * torch.randn([output_dim, hidden_dim])), requires_grad=True)
             self.training_mode = "LocalLosses"
 
         elif "LLS_Random" in self.training_mode:
-            self.feedback = nn.Parameter(torch.Tensor(0.1 * torch.randn([n_classes, hidden_dim])),
+            self.feedback = nn.Parameter(torch.Tensor(0.1 * torch.randn([output_dim, hidden_dim])),
                                          requires_grad=False)
         elif "LLS_M_Random" in self.training_mode:
-            self.feedback = nn.Parameter(torch.Tensor(0.1 * torch.randn([n_classes, hidden_dim])),
+            self.feedback = nn.Parameter(torch.Tensor(0.1 * torch.randn([output_dim, hidden_dim])),
                                          requires_grad=False)
-            self.modulation = nn.Parameter(torch.Tensor(0.01 * torch.randn([n_classes, 1])), requires_grad=True)
+            self.modulation = nn.Parameter(torch.Tensor(0.01 * torch.randn([output_dim, 1])), requires_grad=True)
         elif "LLS_MxM_Random" in self.training_mode:
-            self.feedback = nn.Parameter(torch.Tensor(0.1 * torch.randn([n_classes, hidden_dim])),
+            self.feedback = nn.Parameter(torch.Tensor(0.1 * torch.randn([output_dim, hidden_dim])),
                                          requires_grad=False)
-            self.modulation = nn.Parameter(torch.Tensor(0.01 * torch.randn([n_classes, n_classes])), requires_grad=True)
+            self.modulation = nn.Parameter(torch.Tensor(0.01 * torch.randn([output_dim, output_dim])), requires_grad=True)
         elif "LLS_M" in self.training_mode:
-            self.feedback = nn.Parameter(torch.Tensor(0.01 * torch.randn([n_classes])), requires_grad=True)
+            self.feedback = nn.Parameter(torch.Tensor(0.01 * torch.randn([output_dim])), requires_grad=True)
             self.modulation_mode = 1
         elif "LLS_MxM" in self.training_mode:
-            self.feedback = nn.Parameter(torch.Tensor(0.01 * torch.randn([n_classes, n_classes])), requires_grad=True)
+            self.feedback = nn.Parameter(torch.Tensor(0.01 * torch.randn([output_dim, output_dim])), requires_grad=True)
             self.modulation_mode = 2
         elif "LLS_MxM_reduced" in self.training_mode:
-            self.feedback = nn.Parameter(torch.Tensor(0.01 * torch.randn([self.reduced_set, n_classes])), requires_grad=True)
+            self.feedback = nn.Parameter(torch.Tensor(0.01 * torch.randn([self.reduced_set, output_dim])), requires_grad=True)
             self.modulation_mode = 2
 
         # Optimizer
@@ -192,7 +228,8 @@ class LLS_layer(nn.Module):
                 temperature = self.temperature
                 label_smoothing = self.label_smoothing
                 loss = compute_LLS(out, labels, temperature, label_smoothing, self.pooling_size,
-                                   self.n_classes, waveform=self.waveform, loss_type=self.loss_type)
+                                   self.n_classes, waveform=self.waveform, loss_type=self.loss_type, 
+                                   action_space=self.action_space)
 
         elif self.training_mode == "LLS_M" or self.training_mode == "LLS_MxM" or self.training_mode == "LLS_MxM_reduced":
             temperature = self.temperature
@@ -200,7 +237,8 @@ class LLS_layer(nn.Module):
             loss = compute_LLS(out, labels, temperature, label_smoothing, self.pooling_size,
                                 self.n_classes if self.training_mode != "LLS_MxM_reduced" else self.reduced_set,
                                 modulation=self.modulation_mode, modulation_term=self.feedback,
-                                waveform=self.waveform, loss_type=self.loss_type)
+                                waveform=self.waveform, loss_type=self.loss_type,
+                                action_space=self.action_space)
 
         elif self.training_mode == "LLS_Random" or self.training_mode == "LLS_M_Random" or self.training_mode == "LLS_MxM_Random":
             temperature = self.temperature

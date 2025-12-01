@@ -79,7 +79,7 @@ class LLS_Model(nn.Module):
                                      lr_scheduler=lr_scheduler, patience=patience, temperature=temperature,
                                      label_smoothing=label_smoothing, dropout=dropout, waveform=waveform,
                                      hidden_dim=self.hidden, reduced_set=self.reduced_set, pooling_size=self.hidden,
-                                     loss_type=self.loss_type)
+                                     loss_type=self.loss_type, action_space=self.action_space)
         
         linear_block2 = LinearBlock(self.hidden, self.hidden)
         self.linear_block2 = LLS_layer(block=linear_block2, lr=lr, n_classes=self.n_classes, momentum=momentum,
@@ -88,26 +88,12 @@ class LLS_Model(nn.Module):
                                      lr_scheduler=lr_scheduler, patience=patience, temperature=temperature,
                                      label_smoothing=label_smoothing, dropout=dropout, waveform=waveform,
                                      hidden_dim=self.hidden, reduced_set=self.reduced_set, pooling_size=self.hidden,
-                                     loss_type=self.loss_type)
+                                     loss_type=self.loss_type, action_space=self.action_space)
 
         if is_actor and action_space == "continuous":
             self.linear_out = nn.Linear(self.hidden, num_outputs * 2, bias=bias)
         else:
             self.linear_out = nn.Linear(self.hidden, num_outputs, bias=bias)
-
-        # If using continuous action space with PPO training, need projection heads from hidden layers to action space
-        # Not necessary for standard backprop (--mode train)
-        if is_actor and action_space == "continuous" and "PPO" in training_mode:
-            # Project hidden layer 1 output to (means, log_stds)
-            self.layer1_to_action = nn.Linear(self.hidden, num_outputs * 2, bias=bias)
-            # Project hidden layer 2 output to (means, log_stds)
-            self.layer2_to_action = nn.Linear(self.hidden, num_outputs * 2, bias=bias)
-
-            # Verify initialization
-            if torch.isnan(self.layer1_to_action.weight).any():
-                print("ERROR: layer1_to_action weights contain NaN at initialization!")
-            if torch.isnan(self.layer2_to_action.weight).any():
-                print("ERROR: layer2_to_action weights contain NaN at initialization!")
         
         self.to(device)
 
@@ -119,38 +105,6 @@ class LLS_Model(nn.Module):
                 params_dict = [{"params": self.linear_out.parameters()}, {"params": self.feedback}]
             else:
                 params_dict = [{"params": self.linear_out.parameters()}]
-
-            # For continuous action space, create separate optimizers for projection heads
-            if is_actor and action_space == "continuous" and "PPO" in training_mode:
-
-                # # DEBUG
-                # print(f"DEBUG: Creating projection head optimizers for continuous action space")
-
-                if optimizer == "SGD":
-                    self.layer1_proj_optimizer = optim.SGD(
-                        self.layer1_to_action.parameters(),
-                        lr=lr, momentum=momentum,
-                        weight_decay=weight_decay, nesterov=nesterov)
-                    self.layer2_proj_optimizer = optim.SGD(
-                        self.layer2_to_action.parameters(),
-                        lr=lr, momentum=momentum,
-                        weight_decay=weight_decay, nesterov=nesterov)
-
-                elif optimizer == "Adam":
-                    # Use lower learning rate for projection head optimizers
-                    proj_lr = 0.00005 # 0.0001
-                    self.layer1_proj_optimizer = optim.Adam(self.layer1_to_action.parameters(),
-                        lr=proj_lr, weight_decay=weight_decay)
-                    self.layer2_proj_optimizer = optim.Adam(self.layer2_to_action.parameters(),
-                        lr=proj_lr, weight_decay=weight_decay)
-
-                elif optimizer == "AdamWSF":
-                    self.layer1_proj_optimizer = AdamWScheduleFree(
-                        self.layer1_to_action.parameters(),
-                        lr=lr, weight_decay=weight_decay)
-                    self.layer2_proj_optimizer = AdamWScheduleFree(
-                        self.layer2_to_action.parameters(),
-                        lr=lr, weight_decay=weight_decay)
                 
             if optimizer == "SGD":
                 self.optimizer = optim.SGD(params_dict, lr=lr, momentum=momentum, weight_decay=weight_decay,
@@ -240,96 +194,22 @@ class LLS_Model(nn.Module):
             self.optimizer.step()
 
         else: # Continuous env
-            # Update projection heads layer-wise (similar to discrete case)
+            # Update LLS layers directly using their layer_update_continuous_ppo method
             for i in range(len(hidden_states)):
-                # Split hidden_states[i] into means and log_stds
-                action_dim = acts.shape[-1]
-                means = hidden_states[i][..., :action_dim]
-                log_stds = hidden_states[i][..., action_dim:]
-
-                # Debug: Check for NaN before clamping
-                # if torch.isnan(hidden_states[i]).any():
-                #     print(f"ERROR: NaN in hidden_states[{i}] BEFORE clamping!")
-                #     print(f"Range: [{hidden_states[i].min()}, {hidden_states[i].max()}]")
+                action_params = hidden_states[i]  # [batch, action_dim * 2]
+                old_log_prob_layer = old_layer_log_probs[:, i]
                 
-                # Clamp for stability
-                means = torch.clamp(means, -2, 2)
-                # Clamp log_stds to enforce minimum std of 0.1 (exp(-2.3) ≈ 0.1)
-                # to prevent policy collapse
-                log_stds = torch.clamp(log_stds, -2.3, 2)
-
-                # # Debug: Check for NaN after clamping
-                # if torch.isnan(means).any():
-                #     print(f"ERROR: NaN in means[{i}] AFTER clamping!")
-                # if torch.isnan(log_stds).any():
-                #     print(f"ERROR: NaN in log_stds[{i}] AFTER clamping!")
-
-                stds = log_stds.exp()
-
-                # # Debug: Check for NaN/inf in stds
-                # if torch.isnan(stds).any():
-                #     print(f"ERROR: NaN in stds[{i}]! log_stds range: [{log_stds.min()}, {log_stds.max()}]")
-                # if torch.isinf(stds).any():
-                #     print(f"ERROR: Inf in stds[{i}]! log_stds range: [{log_stds.min()}, {log_stds.max()}]")
-                # # Debug: Check if stds are collapsing (too small)
-                # if (stds < 0.01).any():
-                #     print(f"WARNING: Very small stds in layer[{i}]! Min std={stds.min():.6f}, this causes huge negative log_probs and gradient explosion")
-                
-                # Create distribution and compute log prob
-                dist = Normal(means, stds)
-                log_prob = dist.log_prob(acts.to(device)).sum(dim=-1)
-                
-                # PPO loss
-                log_ratio = log_prob - old_layer_log_probs[:, i].to(device)
-                # # Debug: Warn about large log_ratios
-                # if log_ratio.abs().max() > 10:
-                #     print(f"WARNING: Large log_ratio in layer[{i}]! Range: [{log_ratio.min():.2f}, {log_ratio.max():.2f}]")
-                # Clip log_ratio
-                # Clip log_ratio to prevent exp overflow (exp(20) = 4e8, exp(50) = 5e21 = inf)
-                log_ratio = torch.clamp(log_ratio, -20, 20)
-                ratio = torch.exp(log_ratio)
-                surr1 = ratio * advantage[i]
-                surr2 = torch.clamp(ratio, 1 - clip, 1 + clip) * advantage[i]
-                actor_loss = -torch.min(surr1, surr2).mean()
-                entropy_loss = dist.entropy().sum(dim=-1).mean()
-                actor_loss = actor_loss - ent_coef * entropy_loss
-                
-                # Update corresponding projection head
                 if i == 0:
-                    self.layer1_proj_optimizer.zero_grad()
-                    actor_loss.backward(retain_graph=True)
-                    # Zero LLS layer gradients to prevent accumulation
-                    for param in self.linear_block1.parameters():
-                        if param.grad is not None:
-                            param.grad.zero_()
-
-                    # # Debug: Check gradient magnitudes before clipping
-                    # total_norm = 0
-                    # for p in self.layer1_to_action.parameters():
-                    #     if p.grad is not None:
-                    #         param_norm = p.grad.data.norm(2)
-                    #         total_norm += param_norm.item() ** 2
-                    #         total_norm = total_norm ** 0.5
-                    # if total_norm > 100:
-                    #     print(f"WARNING: Large gradients in layer1 projection! Norm={total_norm}")
-
-                    nn.utils.clip_grad_norm_(self.layer1_to_action.parameters(), max_grad_norm)
-                    self.layer1_proj_optimizer.step()
-
-                    # # Debug: Check if parameters became NaN after step
-                    # if torch.isnan(self.layer1_to_action.weight).any():
-                    #     print(f"ERROR: layer1_to_action weights became NaN after optimizer step!")
-
+                    self.linear_block1.layer_update_continuous_ppo(
+                        action_params, acts, old_log_prob_layer, advantage[i],
+                        clip, ent_coef, max_grad_norm
+                    )
                 elif i == 1:
-                    self.layer2_proj_optimizer.zero_grad()
-                    actor_loss.backward(retain_graph=True)
-                    # Zero LLS layer gradients to prevent accumulation
-                    for param in self.linear_block2.parameters():
-                        if param.grad is not None:
-                            param.grad.zero_()
-                    nn.utils.clip_grad_norm_(self.layer2_to_action.parameters(), max_grad_norm)
-                    self.layer2_proj_optimizer.step()
-            
+                    self.linear_block2.layer_update_continuous_ppo(
+                        action_params, acts, old_log_prob_layer, advantage[i],
+                        clip, ent_coef, max_grad_norm
+                    )
+                    
             # Output layer (continuous)
             means, log_stds = x
             stds = log_stds.exp()
@@ -359,42 +239,23 @@ class LLS_Model(nn.Module):
         layer_pred = layer_pred_LLS(x, act_size=self.hidden, n_classes=self.n_classes, 
                                     modulation_term=self.linear_block1.feedback, 
                                     modulation=self.linear_block1.modulation_mode, 
-                                    freq=None, waveform=self.waveform)
+                                    freq=None, waveform=self.waveform, 
+                                    action_space=self.action_space)
         
-        if self.is_actor and self.action_space == "continuous":
-            # Project hidden activations (not LLS predictions) to action space (means + log_stds)
-            # Use x (the hidden layer output) which has shape [batch, 64]
-            # # Debug: Check for NaN
-            # if torch.isnan(x).any():
-            #     print(f"ERROR: NaN in LLS layer1 output x! min={x.min()}, max={x.max()}, mean={x.mean()}")
-
-            action_pred = self.layer1_to_action(x.detach())
-
-            # if torch.isnan(action_pred).any():
-            #     print(f"ERROR: NaN in layer1 projection output! Input x range: [{x.min()}, {x.max()}]")
-            #     print(f"Projection weight range: [{self.layer1_to_action.weight.min()}, {self.layer1_to_action.weight.max()}]")
-            
-            # DEBUG
-            # if self.layer1_to_action.bias is not None:
-                # print(f"Projection bias range: [{self.layer1_to_action.bias.min()}, {self.layer1_to_action.bias.max()}]")
-
-            hidden_states.append(action_pred)
-        else:
-            hidden_states.append(layer_pred[0].clone())
+        # hidden_states.append(layer_pred[0].clone())
+        if self.is_actor:
+            hidden_states.append(layer_pred.clone())
         
         x = self.linear_block2(x) 
         layer_pred = layer_pred_LLS(x, act_size=self.hidden, n_classes=self.n_classes, 
                                     modulation_term=self.linear_block2.feedback, 
                                     modulation=self.linear_block2.modulation_mode, 
-                                    freq=None, waveform=self.waveform)
+                                    freq=None, waveform=self.waveform,
+                                    action_space=self.action_space)
         
-        if self.is_actor and self.action_space == "continuous":
-            # Project hidden activations (not LLS predictions) to action space (means + log_stds)
-            # Use x (the hidden layer output) which has shape [batch, 64]
-            action_pred = self.layer2_to_action(x.detach())
-            hidden_states.append(action_pred)
-        else:
-            hidden_states.append(layer_pred[0].clone())
+        # hidden_states.append(layer_pred[0].clone())
+        if self.is_actor:
+            hidden_states.append(layer_pred.clone())
         
         x = self.linear_out(x.detach())
 
