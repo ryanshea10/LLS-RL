@@ -277,6 +277,11 @@ class LLS_layer(nn.Module):
             max_grad_norm: Maximum gradient norm for clipping
         """
         
+        action_params = action_params.to(device)
+        actions = actions.to(device)
+        old_log_probs = old_log_probs.to(device).detach()
+        advantage = advantage.to(device).detach()
+
         # Split into means and log_stds
         action_dim = actions.shape[-1]
         means = action_params[..., :action_dim]

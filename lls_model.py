@@ -194,21 +194,59 @@ class LLS_Model(nn.Module):
             self.optimizer.step()
 
         else: # Continuous env
-            # Update LLS layers directly using their layer_update_continuous_ppo method
-            for i in range(len(hidden_states)):
-                action_params = hidden_states[i]  # [batch, action_dim * 2]
-                old_log_prob_layer = old_layer_log_probs[:, i]
-                
-                if i == 0:
-                    self.linear_block1.layer_update_continuous_ppo(
-                        action_params, acts, old_log_prob_layer, advantage[i],
-                        clip, ent_coef, max_grad_norm
-                    )
-                elif i == 1:
-                    self.linear_block2.layer_update_continuous_ppo(
-                        action_params, acts, old_log_prob_layer, advantage[i],
-                        clip, ent_coef, max_grad_norm
-                    )
+            # IMPORTANT:
+            # We must not call backward() multiple times through the same autograd graph.
+            # `hidden_states` returned by `online_forward()` share computation (layer2 depends on layer1),
+            # so doing per-layer backward passes on those tensors will trigger the double-backward error.
+            #
+            # Instead, we rebuild per-layer action parameters with explicit detach boundaries so each
+            # layer update has an independent graph.
+            obs = obs.to(device)
+            acts = acts.to(device)
+
+            # Layer 1 update (graph includes only layer1 parameters)
+            h1 = self.linear_block1.block(obs)
+            action_params_1 = layer_pred_LLS(
+                h1,
+                act_size=self.hidden,
+                n_classes=self.n_classes,
+                modulation_term=self.linear_block1.feedback,
+                modulation=self.linear_block1.modulation_mode,
+                freq=None,
+                waveform=self.waveform,
+                action_space=self.action_space,
+            )
+            self.linear_block1.layer_update_continuous_ppo(
+                action_params_1,
+                acts,
+                old_layer_log_probs[:, 0].to(device),
+                advantage[0].to(device),
+                clip,
+                ent_coef,
+                max_grad_norm,
+            )
+
+            # Layer 2 update (detach layer1 so this backward doesn't traverse layer1 graph)
+            h2 = self.linear_block2.block(h1.detach())
+            action_params_2 = layer_pred_LLS(
+                h2,
+                act_size=self.hidden,
+                n_classes=self.n_classes,
+                modulation_term=self.linear_block2.feedback,
+                modulation=self.linear_block2.modulation_mode,
+                freq=None,
+                waveform=self.waveform,
+                action_space=self.action_space,
+            )
+            self.linear_block2.layer_update_continuous_ppo(
+                action_params_2,
+                acts,
+                old_layer_log_probs[:, 1].to(device),
+                advantage[1].to(device),
+                clip,
+                ent_coef,
+                max_grad_norm,
+            )
                     
             # Output layer (continuous)
             means, log_stds = x
