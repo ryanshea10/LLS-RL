@@ -31,7 +31,8 @@ def get_args():
     parser.add_argument('--mode', dest='mode', type=str, default='train_lls')              # can be 'train', 'train_lls', or 'test'
     parser.add_argument('--actor_model', dest='actor_model', type=str, default='')     # your actor model filename
     parser.add_argument('--critic_model', dest='critic_model', type=str, default='')   # your critic model filename
-
+    parser.add_argument('--actor_training_mode', dest='actor_training_mode', type=str, default='PPO_LLS_MxM')   # your training mode
+    parser.add_argument('--critic_training_mode', dest='critic_training_mode', type=str, default='LLS_MxM')   # your training mode
     args = parser.parse_args()
 
     return args
@@ -75,7 +76,7 @@ def train(env, hyperparameters, actor_model, critic_model):
     # Train the PPO model with a specified total timesteps
     # NOTE: You can change the total timesteps here, I put a big number just because
     # you can kill the process whenever you feel like PPO is converging
-    model.learn(total_timesteps=200_000_000)
+    model.learn(total_timesteps=2_000_000)
 
 def test(env, actor_model):
     """
@@ -131,17 +132,20 @@ def main(args):
                 'n_updates_per_iteration': 10,
                 'lr': 3e-4, 
                 'clip': 0.2,
-                'render': True,
-                'render_every_i': 10
+                'render': False,
+                'render_every_i': 10,
               }
-
+    
+    if args.mode == "train_lls":
+        hyperparameters['actor_training_mode'] = args.actor_training_mode
+        hyperparameters['critic_training_mode'] = args.critic_training_mode
     # Creates the environment we'll be running. If you want to replace with your own
     # custom environment, note that it must inherit Gym and have both continuous
     # observation and action spaces.
     env = gym.make('LunarLander-v3', 
                    continuous=False,
-                   enable_wind=True,
-                   wind_power=5,
+                   enable_wind=False,
+                #    wind_power=5,
                    render_mode='human' if args.mode == 'test' else 'rgb_array')
 
     # Train or test, depending on the mode specified

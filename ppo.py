@@ -40,6 +40,9 @@ class PPO:
         self.actor = policy_class(self.obs_dim, self.act_dim, is_actor=True)  # ALG STEP 1
         self.critic = policy_class(self.obs_dim, 1, is_actor=False)
 
+        # Determine device
+        self.device = next(self.actor.parameters()).device
+
         # Initialize optimizers for actor and critic
         self.actor_optim = Adam(self.actor.parameters(), lr=self.lr)
         self.critic_optim = Adam(self.critic.parameters(), lr=self.lr)
@@ -251,9 +254,9 @@ class PPO:
             batch_dones.append(ep_dones)
 
         # Reshape data as tensors in the shape specified in function description, before returning
-        batch_obs = torch.tensor(np.array(batch_obs), dtype=torch.float)
-        batch_acts = torch.tensor(np.array(batch_acts), dtype=torch.long)  # Convert to numpy array first
-        batch_log_probs = torch.tensor(np.array(batch_log_probs), dtype=torch.float)
+        batch_obs = torch.tensor(np.array(batch_obs), dtype=torch.float).to(self.device)
+        batch_acts = torch.tensor(np.array(batch_acts), dtype=torch.long).to(self.device)  # Convert to numpy array first
+        batch_log_probs = torch.tensor(np.array(batch_log_probs), dtype=torch.float).to(self.device)
 
         # Log the episodic returns and episodic lengths in this batch.
         self.logger['batch_rews'] = batch_rews
@@ -279,7 +282,7 @@ class PPO:
 
             batch_advantages.extend(advantages)
 
-        return torch.tensor(batch_advantages, dtype=torch.float)
+        return torch.tensor(batch_advantages, dtype=torch.float).to(self.device)
 
     def compute_rtgs(self, batch_rews):
         """
@@ -307,7 +310,7 @@ class PPO:
                 batch_rtgs.insert(0, discounted_reward)
 
         # Convert the rewards-to-go into a tensor
-        batch_rtgs = torch.tensor(batch_rtgs, dtype=torch.float)
+        batch_rtgs = torch.tensor(batch_rtgs, dtype=torch.float).to(self.device)
 
         return batch_rtgs
 
@@ -335,7 +338,7 @@ class PPO:
         log_prob = dist.log_prob(action)
 
         # Return the sampled action and the log probability of that action in our distribution
-        return action.detach().numpy(), log_prob.detach()
+        return action.detach().cpu().numpy(), log_prob.detach().cpu()
 
     def evaluate(self, batch_obs, batch_acts):
         """
@@ -428,11 +431,11 @@ class PPO:
         i_so_far = self.logger['i_so_far']
         avg_ep_lens = np.mean(self.logger['batch_lens'])
         avg_ep_rews = np.mean([np.sum(ep_rews) for ep_rews in self.logger['batch_rews']])
-        avg_actor_loss = np.mean([losses.float().mean() for losses in self.logger['actor_losses']])
-        avg_critic_loss = np.mean([losses.float().mean() for losses in self.logger['critic_losses']])
-        avg_value = np.mean([v.float().mean() for v in self.logger['mean_values']])
-        avg_advantage = np.mean([a.float().mean() for a in self.logger['mean_advantages']])
-        avg_ratio = np.mean([r.float().mean() for r in self.logger['mean_ratios']])
+        avg_actor_loss = np.mean([losses.float().mean().cpu().item() for losses in self.logger['actor_losses']])
+        avg_critic_loss = np.mean([losses.float().mean().cpu().item() for losses in self.logger['critic_losses']])
+        avg_value = np.mean([v.float().mean().cpu().item() for v in self.logger['mean_values']])
+        avg_advantage = np.mean([a.float().mean().cpu().item() for a in self.logger['mean_advantages']])
+        avg_ratio = np.mean([r.float().mean().cpu().item() for r in self.logger['mean_ratios']])
 
         # Log to wandb
         wandb.log({

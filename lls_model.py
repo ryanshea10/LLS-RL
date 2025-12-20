@@ -4,7 +4,7 @@ from lls_utils import AdamWScheduleFree
 import torch.optim as optim
 from torch.nn import functional as F
 from torch.distributions import Categorical
-from lls_layers import LLS_layer, LinearBlock, layer_pred_LLS
+from lls_layers import LLS_layer, LinearBlock, layer_pred
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 import logging
 import numpy as np
@@ -190,13 +190,13 @@ class LLS_Model(nn.Module):
         x = x.to(device)
 
         x = self.linear_block1(x)
-        layer_pred = layer_pred_LLS(x, act_size=self.hidden, n_classes=self.n_classes, modulation_term=self.linear_block1.feedback, 
-                                    modulation=self.linear_block1.modulation_mode, freq=None, waveform=self.waveform)
-        hidden_states.append(layer_pred[0].clone())
+        layer_prediction = layer_pred(x, self.linear_block1.feedback, self.linear_block1.training_mode, act_size=self.hidden, n_classes=self.n_classes, 
+                                    modulation_term=self.linear_block1.modulation_term, modulation=self.linear_block1.modulation_mode, freq=None, waveform=self.waveform)
+        hidden_states.append(layer_prediction[0].clone())
         x = self.linear_block2(x.detach()) 
-        layer_pred = layer_pred_LLS(x, act_size=self.hidden, n_classes=self.n_classes, modulation_term=self.linear_block2.feedback, 
-                                    modulation=self.linear_block2.modulation_mode, freq=None, waveform=self.waveform)
-        hidden_states.append(layer_pred[0].clone())
+        layer_prediction = layer_pred(x, self.linear_block1.feedback, self.linear_block2.training_mode, act_size=self.hidden, n_classes=self.n_classes, 
+                                    modulation_term=self.linear_block2.modulation_term, modulation=self.linear_block2.modulation_mode, freq=None, waveform=self.waveform)
+        hidden_states.append(layer_prediction[0].clone())
         x = self.linear_out(x.detach())
 
         if self.is_actor:

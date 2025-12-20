@@ -37,6 +37,34 @@ def compute_LocalLosses(activation, labels, local_classifier, temperature=1, lab
     loss = torch.nn.functional.cross_entropy(layer_pred / temperature, labels, label_smoothing=label_smoothing)
     return loss
 
+def layer_pred_random(activation, feedback, act_size=1, n_classes=10, modulation_term=None, modulation=False):
+    batch_size = activation.size(0) if activation.dim() > 1 else 1
+    if activation.dim() == 4:
+        latents = F.adaptive_avg_pool2d(activation, (act_size, act_size)).view(batch_size, -1)
+    else:
+        latents = F.adaptive_avg_pool1d(activation.view(batch_size, -1), act_size).view(batch_size, -1)
+
+    layer_pred = torch.matmul(latents, feedback.T)
+    if modulation == 1:
+        layer_pred = modulation_term*layer_pred
+    elif modulation == 2:
+        layer_pred = torch.matmul(layer_pred, modulation_term)
+    return layer_pred
+
+def layer_pred_classifier(activation, feedback):
+    layer_pred = feedback(activation).view(1,-1)
+    return layer_pred
+
+def layer_pred(activation, feedback, training_mode, act_size=1, n_classes=10, modulation_term=None, modulation=False, freq=None, waveform="cosine"):
+    if "Random" in training_mode:
+        return layer_pred_random(activation, feedback, act_size, n_classes, modulation_term, modulation)
+    elif "Classifier" in training_mode:
+        return layer_pred_classifier(activation, feedback)
+    elif "LLS" in training_mode:
+        return layer_pred_LLS(activation, act_size, n_classes, modulation_term, modulation, freq=freq, waveform=waveform)
+    else:
+        raise ValueError(f"Unknown training mode: {training_mode}")
+
 def layer_pred_LLS(activation, act_size=1, n_classes=10, modulation_term=None, modulation=False, freq=None, waveform="cosine"):
     batch_size = activation.size(0) if activation.dim() > 1 else 1
     if activation.dim() == 4:
@@ -57,13 +85,13 @@ def layer_pred_LLS(activation, act_size=1, n_classes=10, modulation_term=None, m
 
     return layer_pred
 
-def compute_LLS(activation, labels, temperature=1, label_smoothing=0.0, act_size=1, n_classes=10,
+def compute_LLS(activation, labels, feedback, training_mode, temperature=1, label_smoothing=0.0, act_size=1, n_classes=10,
                 modulation_term=None, modulation=False, freq=None, waveform="cosine", loss_type="cross_entropy"):
-    layer_pred = layer_pred_LLS(activation, act_size, n_classes, modulation_term, modulation, freq, waveform)
+    layer_prediction = layer_pred(activation, feedback, training_mode, act_size, n_classes, modulation_term, modulation, freq, waveform)
     if loss_type == "cross_entropy":
-        loss = torch.nn.functional.cross_entropy(layer_pred / temperature, labels, label_smoothing=label_smoothing)
+        loss = torch.nn.functional.cross_entropy(layer_prediction / temperature, labels, label_smoothing=label_smoothing)
     elif loss_type == "mse":
-        loss = torch.nn.functional.mse_loss(layer_pred, labels.to(device))
+        loss = torch.nn.functional.mse_loss(layer_prediction, labels.to(device))
     else:
         raise ValueError(f"{loss_type} is not supported")
     return loss
@@ -124,6 +152,7 @@ class LLS_layer(nn.Module):
         self.feedback = None
         self.modulation = None
         self.modulation_mode = None
+        self.modulation_term = None
 
         if  "LocalLosses" in self.training_mode:
             self.feedback = nn.Parameter(torch.Tensor(0.1 * torch.randn([n_classes, hidden_dim])), requires_grad=True)
@@ -132,23 +161,29 @@ class LLS_layer(nn.Module):
         elif "LLS_Random" in self.training_mode:
             self.feedback = nn.Parameter(torch.Tensor(0.1 * torch.randn([n_classes, hidden_dim])),
                                          requires_grad=False)
+            self.modulation_term = None
         elif "LLS_M_Random" in self.training_mode:
             self.feedback = nn.Parameter(torch.Tensor(0.1 * torch.randn([n_classes, hidden_dim])),
                                          requires_grad=False)
-            self.modulation = nn.Parameter(torch.Tensor(0.01 * torch.randn([n_classes, 1])), requires_grad=True)
+            self.modulation_term = nn.Parameter(torch.Tensor(0.01 * torch.randn([n_classes])), requires_grad=True)
+            self.modulation_mode = 1
         elif "LLS_MxM_Random" in self.training_mode:
             self.feedback = nn.Parameter(torch.Tensor(0.1 * torch.randn([n_classes, hidden_dim])),
                                          requires_grad=False)
-            self.modulation = nn.Parameter(torch.Tensor(0.01 * torch.randn([n_classes, n_classes])), requires_grad=True)
-        elif "LLS_M" in self.training_mode:
-            self.feedback = nn.Parameter(torch.Tensor(0.01 * torch.randn([n_classes])), requires_grad=True)
-            self.modulation_mode = 1
+            self.modulation_term = nn.Parameter(torch.Tensor(0.01 * torch.randn([n_classes, n_classes])), requires_grad=True)
+            self.modulation_mode = 2
         elif "LLS_MxM" in self.training_mode:
-            self.feedback = nn.Parameter(torch.Tensor(0.01 * torch.randn([n_classes, n_classes])), requires_grad=True)
+            self.modulation_term = nn.Parameter(torch.Tensor(0.01 * torch.randn([n_classes, n_classes])), requires_grad=True)
             self.modulation_mode = 2
+        elif "LLS_M" in self.training_mode:
+            self.modulation_term = nn.Parameter(torch.Tensor(0.01 * torch.randn([n_classes])), requires_grad=True)
+            self.modulation_mode = 1
         elif "LLS_MxM_reduced" in self.training_mode:
-            self.feedback = nn.Parameter(torch.Tensor(0.01 * torch.randn([self.reduced_set, n_classes])), requires_grad=True)
+            self.modulation_term = nn.Parameter(torch.Tensor(0.01 * torch.randn([self.reduced_set, n_classes])), requires_grad=True)
             self.modulation_mode = 2
+        elif "Classifier" in self.training_mode:
+            self.modulation_term = None
+            self.feedback = nn.Linear(hidden_dim, n_classes, bias=True)
 
         # Optimizer
         if training_mode != "BP":
@@ -187,37 +222,37 @@ class LLS_layer(nn.Module):
         self.loss_avg = 0
     
     def layer_update(self, out, labels, feedback):
-        if self.training_mode == "LLS":
-                temperature = self.temperature
-                label_smoothing = self.label_smoothing
-                loss = compute_LLS(out, labels, temperature, label_smoothing, self.pooling_size,
-                                   self.n_classes, waveform=self.waveform, loss_type=self.loss_type)
+        # if self.training_mode == "LLS" or self.training_mode:
+        #         temperature = self.temperature
+        #         label_smoothing = self.label_smoothing
+        #         loss = compute_LLS(out, labels, self.feedback, self.training_mode, temperature, label_smoothing, self.pooling_size,
+        #                            self.n_classes, waveform=self.waveform, loss_type=self.loss_type)
 
-        elif self.training_mode == "LLS_M" or self.training_mode == "LLS_MxM" or self.training_mode == "LLS_MxM_reduced":
-            temperature = self.temperature
-            label_smoothing = self.label_smoothing
-            loss = compute_LLS(out, labels, temperature, label_smoothing, self.pooling_size,
-                                self.n_classes if self.training_mode != "LLS_MxM_reduced" else self.reduced_set,
-                                modulation=self.modulation_mode, modulation_term=self.feedback,
-                                waveform=self.waveform, loss_type=self.loss_type)
+        # elif self.training_mode == "LLS_M" or self.training_mode == "LLS_MxM" or self.training_mode == "LLS_MxM_reduced":
+        #     temperature = self.temperature
+        #     label_smoothing = self.label_smoothing
+        loss = compute_LLS(out, labels, self.feedback, self.training_mode, self.temperature, self.label_smoothing, self.pooling_size,
+                            self.n_classes if self.training_mode != "LLS_MxM_reduced" else self.reduced_set,
+                            modulation=self.modulation_mode, modulation_term=self.modulation_term,
+                            waveform=self.waveform, loss_type=self.loss_type)
 
-        elif self.training_mode == "LLS_Random" or self.training_mode == "LLS_M_Random" or self.training_mode == "LLS_MxM_Random":
-            temperature = self.temperature
-            label_smoothing = self.label_smoothing
-            if self.training_mode == "LLS_Random":
-                feedback = self.feedback
-            elif self.training_mode == "LLS_M_Random":
-                feedback = self.modulation * self.feedback
-            else:
-                feedback = torch.matmul(self.modulation, self.feedback)
-            loss = compute_LocalLosses(out, labels, feedback, temperature, label_smoothing, act_size=self.pooling_size)
+        # elif self.training_mode == "LLS_Random" or self.training_mode == "LLS_M_Random" or self.training_mode == "LLS_MxM_Random":
+        #     temperature = self.temperature
+        #     label_smoothing = self.label_smoothing
+        #     if self.training_mode == "LLS_Random":
+        #         feedback = self.feedback
+        #     elif self.training_mode == "LLS_M_Random":
+        #         feedback = self.modulation * self.feedback
+        #     else:
+        #         feedback = torch.matmul(self.modulation, self.feedback)
+        #     loss = compute_LocalLosses(out, labels, feedback, temperature, label_smoothing, act_size=self.pooling_size)
 
-        elif self.training_mode == "LocalLosses":
-            temperature = self.temperature
-            label_smoothing = self.label_smoothing
-            loss = compute_LocalLosses(out, labels, self.feedback, temperature, label_smoothing, act_size=self.pooling_size)
-        else:
-            raise NotImplementedError(f"Unknown training mode: {self.training_mode}")
+        # elif self.training_mode == "LocalLosses":
+        #     temperature = self.temperature
+        #     label_smoothing = self.label_smoothing
+        #     loss = compute_LocalLosses(out, labels, self.feedback, temperature, label_smoothing, act_size=self.pooling_size)
+        # else:
+        #     raise NotImplementedError(f"Unknown training mode: {self.training_mode}")
 
         self.optimizer.zero_grad()
         loss.backward()

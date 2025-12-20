@@ -37,8 +37,8 @@ class PPO_LLS:
         self.act_dim = env.action_space.n  # Number of discrete actions
 
         # Initialize actor and critic networks
-        self.actor = policy_class(self.obs_dim, self.act_dim, is_actor=True, training_mode="PPO_LLS_MxM", optimizer="AdamWSF")  # ALG STEP 1
-        self.critic = policy_class(self.obs_dim, 1, is_actor=False, training_mode="LLS_MxM", optimizer="AdamWSF", loss_type='mse',
+        self.actor = policy_class(self.obs_dim, self.act_dim, is_actor=True, training_mode=self.actor_training_mode, optimizer="AdamWSF")  # ALG STEP 1
+        self.critic = policy_class(self.obs_dim, 1, is_actor=False, training_mode=self.critic_training_mode, optimizer="AdamWSF", loss_type='mse',
                                   lr=hyperparameters['lr'])
 
         # This logger will help us with printing out summaries of each iteration
@@ -58,6 +58,7 @@ class PPO_LLS:
         # Initialize wandb
         wandb.init(
             project="ppo-training",
+            name=f"no_wind_{self.actor_training_mode}_{time.strftime('%Y-%m-%d_%H-%M-%S')}",
             config={
                 "timesteps_per_batch": self.timesteps_per_batch,
                 "max_timesteps_per_episode": self.max_timesteps_per_episode,
@@ -380,7 +381,7 @@ class PPO_LLS:
 
         # Change any default values to custom values for specified hyperparameters
         for param, val in hyperparameters.items():
-            exec('self.' + param + ' = ' + str(val))
+            setattr(self, param, val)
 
         # Sets the seed if specified
         if self.seed != None:
