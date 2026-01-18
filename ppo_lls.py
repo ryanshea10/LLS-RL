@@ -55,10 +55,18 @@ class PPO_LLS:
             'mean_ratios': [],      # mean policy ratios
         }
 
+        enable_wind = self.env.unwrapped.enable_wind
+        wind_power = self.env.unwrapped.wind_power
+        turbulence_power = self.env.unwrapped.turbulence_power
+        if enable_wind:
+            name = f"wind_{self.actor_training_mode}_{wind_power}_{turbulence_power}_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
+        else:
+            name = "no_wind_{self.actor_training_mode}_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
+
         # Initialize wandb
         wandb.init(
-            project="ppo-training",
-            name=f"no_wind_{self.actor_training_mode}_{time.strftime('%Y-%m-%d_%H-%M-%S')}",
+            project="lunar-lander-wind",
+            name=name,
             config={
                 "timesteps_per_batch": self.timesteps_per_batch,
                 "max_timesteps_per_episode": self.max_timesteps_per_episode,

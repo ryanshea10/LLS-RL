@@ -33,6 +33,9 @@ def get_args():
     parser.add_argument('--critic_model', dest='critic_model', type=str, default='')   # your critic model filename
     parser.add_argument('--actor_training_mode', dest='actor_training_mode', type=str, default='PPO_LLS_MxM')   # your training mode
     parser.add_argument('--critic_training_mode', dest='critic_training_mode', type=str, default='LLS_MxM')   # your training mode
+    parser.add_argument('--enable_wind', dest='enable_wind', action='store_true')   # whether to enable wind
+    parser.add_argument('--wind_power', dest='wind_power', type=float, default=5.0)   # your wind power
+    parser.add_argument('--turbulence_power', dest='turbulence_power', type=float, default=1.5)   # your turbulence power
     args = parser.parse_args()
 
     return args
@@ -144,8 +147,9 @@ def main(args):
     # observation and action spaces.
     env = gym.make('LunarLander-v3', 
                    continuous=False,
-                   enable_wind=False,
-                #    wind_power=5,
+                   enable_wind=args.enable_wind,
+                   wind_power=args.wind_power,
+                   turbulence_power=args.turbulence_power,
                    render_mode='human' if args.mode == 'test' else 'rgb_array')
 
     # Train or test, depending on the mode specified
