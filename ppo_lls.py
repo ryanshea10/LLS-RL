@@ -55,17 +55,24 @@ class PPO_LLS:
             'mean_ratios': [],      # mean policy ratios
         }
 
-        enable_wind = self.env.unwrapped.enable_wind
-        wind_power = self.env.unwrapped.wind_power
-        turbulence_power = self.env.unwrapped.turbulence_power
-        if enable_wind:
-            name = f"wind_{self.actor_training_mode}_{wind_power}_{turbulence_power}_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
-        else:
-            name = "no_wind_{self.actor_training_mode}_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
+        # enable_wind = self.env.unwrapped.enable_wind
+        # wind_power = self.env.unwrapped.wind_power
+        # turbulence_power = self.env.unwrapped.turbulence_power
+        # if enable_wind:
+        #     name = f"wind_{self.actor_training_mode}_{wind_power}_{turbulence_power}_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
+        # else:
+        #     name = "no_wind_{self.actor_training_mode}_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
+
+        training_mode = self.actor_training_mode
+        noise_env =self.env.class_name()
+        env_name = self.env.unwrapped.spec.id
+        noise_factor = self.env.noise_rate
+
+        name = f"{training_mode}_{noise_env}_{env_name}_{noise_factor}_{time.strftime('%Y-%m-%d_%H-%M-%S')}"
 
         # Initialize wandb
         wandb.init(
-            project="lunar-lander-wind",
+            project="noisy-env-training",
             name=name,
             config={
                 "timesteps_per_batch": self.timesteps_per_batch,

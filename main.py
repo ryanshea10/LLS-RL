@@ -3,6 +3,7 @@
     https://medium.com/@eyyu/coding-ppo-from-scratch-with-pytorch-part-1-4-613dfc1b14c8
 """
 
+import argparse
 import gymnasium as gym
 import sys
 import torch
@@ -13,7 +14,11 @@ from network import FeedForwardNN
 from lls_model import LLS_Model
 from eval_policy import eval_policy
 
-import argparse
+from noisyenv.wrappers import (
+    RandomMixupObservation, RandomDropoutObservation, RandomNormalNoisyObservation, RandomUniformNoisyObservation,
+    RandomUniformScaleObservation, RandomUniformScaleReward, RandomUniformNoisyReward, RandomNormalNoisyReward
+)
+
 
 def get_args():
     """
@@ -33,12 +38,53 @@ def get_args():
     parser.add_argument('--critic_model', dest='critic_model', type=str, default='')   # your critic model filename
     parser.add_argument('--actor_training_mode', dest='actor_training_mode', type=str, default='PPO_LLS_MxM')   # your training mode
     parser.add_argument('--critic_training_mode', dest='critic_training_mode', type=str, default='LLS_MxM')   # your training mode
-    parser.add_argument('--enable_wind', dest='enable_wind', action='store_true')   # whether to enable wind
-    parser.add_argument('--wind_power', dest='wind_power', type=float, default=5.0)   # your wind power
-    parser.add_argument('--turbulence_power', dest='turbulence_power', type=float, default=1.5)   # your turbulence power
+    parser.add_argument('--environment_name', dest='environment_name', type=str, default='LunarLander-v3')
+    parser.add_argument('--noise_type', dest='noise_type', type=str, default='none')
+    parser.add_argument('--noise_rate', dest='noise_rate', type=float, default=0.1)
+    parser.add_argument('--noise_scale', dest='noise_scale', type=float, default=0.1)
+    parser.add_argument('--noise_low', dest='noise_low', type=float, default=-0.5)
+    parser.add_argument('--noise_high', dest='noise_high', type=float, default=0.5)
+    parser.add_argument('--reward_low', dest='reward_low', type=float, default=-0.5)
+    parser.add_argument('--reward_high', dest='reward_high', type=float, default=0.5)
+    parser.add_argument('--reward_scale', dest='reward_scale', type=float, default=0.1)
     args = parser.parse_args()
 
     return args
+
+def create_lunar_lander_env(enable_wind, wind_power, turbulence_power, mode):
+    # parser.add_argument('--enable_wind', dest='enable_wind', action='store_true')   # whether to enable wind
+    # parser.add_argument('--wind_power', dest='wind_power', type=float, default=5.0)   # your wind power
+    # parser.add_argument('--turbulence_power', dest='turbulence_power', type=float, default=1.5)   # your turbulence power
+    env = gym.make('LunarLander-v3', 
+                   continuous=False,
+                   enable_wind=enable_wind,
+                   wind_power=wind_power,
+                   turbulence_power=turbulence_power,
+                   render_mode='human' if mode == 'test' else 'rgb_array')
+    return env
+
+def apply_noisy_wrappers(env, noise_type, args):
+    if noise_type == 'mixup_obs':
+        env = RandomMixupObservation(env, noise_rate=args.noise_rate)
+    elif noise_type == 'dropout_obs':
+        env = RandomDropoutObservation(env, noise_rate=args.noise_rate)
+    elif noise_type == 'normal_obs':
+        env = RandomNormalNoisyObservation(env, noise_rate=args.noise_rate, scale=args.noise_scale)
+    elif noise_type == 'uniform_obs':
+        env = RandomUniformNoisyObservation(env, noise_rate=args.noise_rate, low=args.noise_low, high=args.noise_high)
+    elif noise_type == 'scale_obs':
+        env = RandomUniformScaleObservation(env, noise_rate=args.noise_rate)
+    elif noise_type == 'scale_reward':
+        env = RandomUniformScaleReward(env, noise_rate=args.noise_rate)
+    elif noise_type == 'noisy_reward':
+        env = RandomUniformNoisyReward(env, noise_rate=args.noise_rate, low=args.reward_low, high=args.reward_high)
+    elif noise_type == 'normal_reward':
+        env = RandomNormalNoisyReward(env, noise_rate=args.noise_rate, scale=args.reward_scale)
+    elif noise_type == 'none':
+        return env
+    else:
+        raise ValueError(f"Invalid noise type: {noise_type}")
+    return env
 
 def train(env, hyperparameters, actor_model, critic_model):
     """
@@ -145,12 +191,8 @@ def main(args):
     # Creates the environment we'll be running. If you want to replace with your own
     # custom environment, note that it must inherit Gym and have both continuous
     # observation and action spaces.
-    env = gym.make('LunarLander-v3', 
-                   continuous=False,
-                   enable_wind=args.enable_wind,
-                   wind_power=args.wind_power,
-                   turbulence_power=args.turbulence_power,
-                   render_mode='human' if args.mode == 'test' else 'rgb_array')
+    env = gym.make(args.environment_name)
+    env = apply_noisy_wrappers(env, args.noise_type, args)
 
     # Train or test, depending on the mode specified
     if 'train' in args.mode:
